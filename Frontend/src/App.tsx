@@ -45,15 +45,13 @@ export const App: React.FC = () => {
           }
         />
 
-        {/* Protected Workspace Routes (Layout with center outlet) */}
+        {/* Workspace Routes (Layout with center outlet) */}
         <Route
           path="/w/:repoId"
           element={
-            <RequireAuth>
-              <RequireRepo>
-                <WorkspaceLayout />
-              </RequireRepo>
-            </RequireAuth>
+            <RequireRepo>
+              <WorkspaceLayout />
+            </RequireRepo>
           }
         >
           <Route index element={<CodeViewPage />} />

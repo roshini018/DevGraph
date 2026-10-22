@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     ]
     ENVIRONMENT: str = "development"
 
+    # Optional GitHub integration settings (OAuth/App)
+    GITHUB_APP_ID: str | None = None
+    GITHUB_CLIENT_ID: str | None = None
+    GITHUB_CLIENT_SECRET: SecretStr | None = None
+    GITHUB_PRIVATE_KEY_PATH: Path | None = None
+    # Secret for signing OAuth state tokens (optional but recommended)
+    OAUTH_STATE_SECRET: SecretStr | None = None
+
     @field_validator("CORS_ORIGINS", mode="after")
     @classmethod
     def parse_cors_origins(cls, value: list[str] | str) -> list[str]:
@@ -51,8 +59,7 @@ def configure_tls() -> None:
     if not existing_cert_file or not os.path.exists(existing_cert_file):
         os.environ["SSL_CERT_FILE"] = certifi.where()
 
-
-@lru_cache
+@lru_cache()
 def get_settings() -> Settings:
     """Return cached application settings, validating environment configuration.
 
@@ -60,7 +67,7 @@ def get_settings() -> Settings:
     names only, preventing sensitive values from appearing in logs or error text.
     """
     try:
-        return Settings()
+        settings = Settings()
     except ValidationError as exc:
         missing_or_invalid = sorted(
             list({str(err["loc"][0]) for err in exc.errors() if err.get("loc")})
@@ -69,3 +76,4 @@ def get_settings() -> Settings:
         raise ValueError(
             f"Missing or invalid configuration: {field_names}"
         ) from None
+    return settings

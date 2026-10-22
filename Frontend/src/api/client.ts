@@ -114,16 +114,55 @@ export async function listRepos(): Promise<ConnectedRepo[]> {
     const res = await fetch('/api/repos');
     if (res.ok) {
       const data = await res.json();
-      return [...publicRepos, ...data];
+      if (Array.isArray(data) && data.length > 0) {
+        const mapped: ConnectedRepo[] = data.map((item: unknown) => {
+          const r = item as Record<string, unknown>;
+          const ownerObj = r.owner as Record<string, unknown> | null | undefined;
+          const ownerLogin =
+            ownerObj && typeof ownerObj === 'object' && typeof ownerObj.login === 'string'
+              ? ownerObj.login
+              : typeof r.owner === 'string'
+              ? r.owner
+              : (typeof r.full_name === 'string' && (r.full_name as string).includes('/') ? (r.full_name as string).split('/')[0] : '');
+          const repoName = (r.name || r.repo_name || String(r.id)) as string;
+          const fullName = (r.full_name || (ownerLogin ? `${ownerLogin}/${repoName}` : repoName)) as string;
+
+          return {
+            id: fullName,
+            repo_name: repoName,
+            full_name: fullName,
+            branch: (r.default_branch || r.branch || 'main') as string,
+            status: (r.status || {
+              state: 'ready',
+              stage: 'Repository connected',
+              progress: 100,
+              files_total: r.file_count || 0,
+              files_done: r.file_count || 0,
+              error: null,
+              updated_at: r.updated_at || new Date().toISOString(),
+            }) as ConnectedRepo['status'],
+            file_count: (r.file_count || 0) as number,
+            symbol_count: (r.symbol_count || 0) as number,
+            edge_count: (r.edge_count || 0) as number,
+            language: (r.language || 'Unknown') as string,
+            updated_at: (r.updated_at || new Date().toISOString()) as string,
+            ...(r.id ? { github_id: r.id as number } : {}),
+            ...(ownerLogin ? { owner: ownerLogin } : {}),
+            ...(r.private !== undefined ? { is_private: r.private as boolean } : {}),
+          };
+        });
+        const filteredPublic = publicRepos.filter(
+          p => !mapped.some(m => m.full_name === p.full_name || m.id === p.id)
+        );
+        return [...filteredPublic, ...mapped];
+      }
     }
   } catch {
     // backend offline
   }
 
   if (!USE_MOCKS) {
-    const res = await fetch('/api/repos');
-    if (!res.ok) throw await res.json();
-    return res.json();
+    return publicRepos;
   }
 
   await simulateDelay();
@@ -145,7 +184,7 @@ export async function getIndexStatus(_repoId: string = 'repo-1'): Promise<IndexS
   }
 
   try {
-    const res = await fetch(`/api/repos/${_repoId}/status`);
+    const res = await fetch(`/api/repos/${encodeURIComponent(_repoId)}/status`);
     if (res.ok) {
       return await res.json();
     }
@@ -154,7 +193,7 @@ export async function getIndexStatus(_repoId: string = 'repo-1'): Promise<IndexS
   }
 
   if (!USE_MOCKS) {
-    const res = await fetch(`/api/repos/${_repoId}/status`);
+    const res = await fetch(`/api/repos/${encodeURIComponent(_repoId)}/status`);
     if (!res.ok) throw await res.json();
     return res.json();
   }
@@ -190,8 +229,6 @@ export interface GithubUrlValidationResult {
   error?: string;
 }
 
-const GITHUB_URL_REGEX = /^(?:https?:\/\/github\.com\/)?([a-zA-Z0-9_.-]+)\/([a-zA-Z0-9_.-]+?)(?:\.git)?(?:\/.*)?$/;
-
 /**
  * Validate and parse a GitHub repository URL or slug.
  */
@@ -201,16 +238,50 @@ export function validateGithubUrl(rawUrl: string): GithubUrlValidationResult {
     return { valid: false, error: 'Repository URL cannot be empty.' };
   }
 
-  const match = trimmed.match(GITHUB_URL_REGEX);
-  if (!match) {
+  if (trimmed.includes('@')) {
+    return { valid: false, error: 'Embedded credentials are not allowed in repository URLs.' };
+  }
+
+  if (trimmed.includes('?') || trimmed.includes('#')) {
+    return { valid: false, error: 'Query parameters and fragments are not allowed in repository URLs.' };
+  }
+
+  if (trimmed.startsWith('http://')) {
+    return { valid: false, error: 'HTTP is not supported. Use https://github.com/{owner}/{repo}' };
+  }
+
+  if (trimmed.startsWith('https://') && !trimmed.startsWith('https://github.com/')) {
+    return { valid: false, error: 'Only GitHub repositories are supported (https://github.com/{owner}/{repo}).' };
+  }
+
+  let slug = trimmed;
+  if (slug.startsWith('https://github.com/')) {
+    slug = slug.slice('https://github.com/'.length);
+  }
+
+  slug = slug.replace(/\/+$/, '');
+  if (slug.endsWith('.git')) {
+    slug = slug.slice(0, -4);
+  }
+
+  const parts = slug.split('/');
+  if (parts.length !== 2 || !parts[0] || !parts[1]) {
     return {
       valid: false,
-      error: 'Invalid GitHub URL format. Use https://github.com/owner/repo or owner/repo',
+      error: 'Invalid GitHub URL format. Expected https://github.com/{owner}/{repo}',
     };
   }
 
-  const [, owner, repo] = match;
-  const reservedSlugs = ['login', 'settings', 'explore', 'pricing', 'features', 'pulls', 'issues'];
+  const [owner, repo] = parts;
+  const validPattern = /^[a-zA-Z0-9_.-]+$/;
+  if (!validPattern.test(owner) || !validPattern.test(repo)) {
+    return {
+      valid: false,
+      error: 'Owner and repository name can only contain letters, numbers, underscores, periods, and hyphens.',
+    };
+  }
+
+  const reservedSlugs = ['login', 'settings', 'explore', 'pricing', 'features', 'pulls', 'issues', 'orgs'];
   if (reservedSlugs.includes(owner.toLowerCase())) {
     return {
       valid: false,
@@ -269,20 +340,49 @@ export async function getGithubAuthUrl(): Promise<string> {
 /**
  * Exchange OAuth callback temporary code for authenticated user and repositories.
  */
-export async function exchangeGithubCode(code: string): Promise<{
+export async function exchangeGithubCode(code: string, state?: string): Promise<{
   user: { id: string; username: string; name: string; avatar_url: string };
   repositories: GithubRepo[];
 }> {
   const res = await fetch('/api/auth/github/callback', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ code }),
+    body: JSON.stringify({ code, ...(state ? { state } : {}) }),
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({}));
     throw new Error(err.detail || 'Failed to exchange GitHub authorization code.');
   }
   return await res.json();
+}
+
+/**
+ * Check current authenticated session from server HttpOnly cookie.
+ */
+export async function checkSession(): Promise<{
+  authenticated: boolean;
+  user: { id: string; username: string; name: string; avatar_url: string } | null;
+}> {
+  try {
+    const res = await fetch('/api/auth/session');
+    if (res.ok) {
+      return await res.json();
+    }
+  } catch {
+    // backend offline
+  }
+  return { authenticated: false, user: null };
+}
+
+/**
+ * Log out and invalidate server-side session.
+ */
+export async function logoutGithub(): Promise<void> {
+  try {
+    await fetch('/api/auth/logout', { method: 'POST' });
+  } catch {
+    // backend offline
+  }
 }
 
 // In-memory registry for public repositories analyzed in session
@@ -310,41 +410,86 @@ export async function analyzePublicRepo(rawUrl: string): Promise<ConnectedRepo> 
 
     if (backendRes.ok) {
       const data = await backendRes.json();
+      const resolvedRepoId = data?.repo_id || repoId;
+      const resolvedRepoName = data?.repo_name || repo;
+      const resolvedFullName = data?.full_name || `${owner}/${repo}`;
+      const resolvedBranch = data?.default_branch || 'main';
+      const resolvedLanguage = data?.language || 'Unknown';
+      const resolvedState = data?.state || 'pending';
+      const resolvedStage =
+        typeof data?.stage === 'string'
+          ? data.stage
+          : 'Repository validated. Code parsing, graph building, and vector indexing are not yet implemented.';
+      const resolvedProgress = typeof data?.progress === 'number' ? data.progress : 0;
+      const resolvedFilesTotal = typeof data?.files_total === 'number' ? data.files_total : 0;
+      const resolvedFilesDone = typeof data?.files_done === 'number' ? data.files_done : 0;
+      const resolvedSymbolsCount = typeof data?.symbols_count === 'number' ? data.symbols_count : 0;
+      const resolvedEdgesCount = typeof data?.edges_count === 'number' ? data.edges_count : 0;
+      const resolvedError = data?.error || null;
+      const resolvedUpdatedAt = data?.updated_at || new Date().toISOString();
+
       const connected: ConnectedRepo = {
-        id: data.repo_id,
-        repo_name: data.repo_name,
-        full_name: data.full_name,
-        branch: data.default_branch || 'main',
+        id: resolvedRepoId,
+        repo_name: resolvedRepoName,
+        full_name: resolvedFullName,
+        branch: resolvedBranch,
         status: {
-          state: data.state,
-          stage: data.stage,
-          progress: data.progress,
-          files_total: data.files_total || 0,
-          files_done: data.files_done || 0,
-          error: data.error,
-          updated_at: data.updated_at,
+          state: resolvedState,
+          stage: resolvedStage,
+          progress: resolvedProgress,
+          files_total: resolvedFilesTotal,
+          files_done: resolvedFilesDone,
+          error: resolvedError,
+          updated_at: resolvedUpdatedAt,
         },
-        file_count: data.files_total || 0,
-        symbol_count: data.symbols_count || 0,
-        edge_count: data.edges_count || 0,
-        language: data.language || 'Python',
-        updated_at: data.updated_at,
+        file_count: resolvedFilesTotal,
+        symbol_count: resolvedSymbolsCount,
+        edge_count: resolvedEdgesCount,
+        language: resolvedLanguage,
+        updated_at: resolvedUpdatedAt,
       };
-      PUBLIC_REPOS_STORE.set(data.repo_id, { repo: connected, status: connected.status });
+      PUBLIC_REPOS_STORE.set(resolvedFullName, { repo: connected, status: connected.status });
+      PUBLIC_REPOS_STORE.set(resolvedRepoId, { repo: connected, status: connected.status });
       return connected;
-    } else if (backendRes.status === 422 || backendRes.status === 404 || backendRes.status === 400) {
-      const err = await backendRes.json();
-      throw new Error(err.detail || 'Repository validation failed');
+    } else {
+      let detailMsg = `Repository analysis failed (HTTP ${backendRes.status})`;
+      try {
+        const err = await backendRes.json();
+        if (typeof err.detail === 'string') {
+          detailMsg = err.detail;
+        } else if (Array.isArray(err.detail) && err.detail.length > 0) {
+          detailMsg = err.detail
+            .map((e: unknown) =>
+              typeof e === 'object' && e !== null && 'msg' in e
+                ? String((e as { msg: unknown }).msg)
+                : String(e)
+            )
+            .join(', ');
+        } else if (typeof err.message === 'string') {
+          detailMsg = err.message;
+        }
+      } catch {
+        // Fall back to status text
+      }
+      throw new Error(detailMsg);
     }
-  } catch (err: any) {
-    // If it's a known validation error from backend, rethrow it
-    if (err?.message && !err.message.includes('fetch')) {
+  } catch (err: unknown) {
+    if (err instanceof Error) {
+      const isNetworkError =
+        err.message.includes('fetch') ||
+        err.message.includes('NetworkError') ||
+        err.message.includes('Failed to fetch') ||
+        err.message.includes('ECONNREFUSED');
+      if (!isNetworkError) {
+        throw err;
+      }
+    }
+    if (!USE_MOCKS) {
       throw err;
     }
-    // Otherwise fallback to client-side GitHub API validation
   }
 
-  // Client-side fallback: check GitHub public API directly
+  // Client-side fallback: check GitHub public API directly when backend is unreachable
   const ghApiUrl = `https://api.github.com/repos/${owner}/${repo}`;
   const ghRes = await fetch(ghApiUrl, {
     headers: { Accept: 'application/vnd.github.v3+json' },
@@ -365,9 +510,9 @@ export async function analyzePublicRepo(rawUrl: string): Promise<ConnectedRepo> 
   }
 
   const initialStatus: IndexStatus = {
-    state: 'queued',
-    stage: `Queued: Ingesting public repository ${owner}/${repo}`,
-    progress: 10,
+    state: 'pending',
+    stage: 'Repository validated via GitHub API. Code parsing, graph building, and vector indexing are not yet implemented in mock mode.',
+    progress: 0,
     files_total: 0,
     files_done: 0,
     error: null,
@@ -388,62 +533,10 @@ export async function analyzePublicRepo(rawUrl: string): Promise<ConnectedRepo> 
   };
 
   PUBLIC_REPOS_STORE.set(repoId, { repo: newConnectedRepo, status: initialStatus });
-
-  // Simulate realistic multi-stage processing pipeline for client-side fallback
-  setTimeout(() => {
-    updatePublicRepoStatus(repoId, {
-      state: 'fetching',
-      stage: `Fetching file tree from branch '${meta.default_branch || 'main'}'...`,
-      progress: 30,
-      files_total: 24,
-      files_done: 6,
-    });
-  }, 1000);
-
-  setTimeout(() => {
-    updatePublicRepoStatus(repoId, {
-      state: 'parsing',
-      stage: 'Parsing Python AST symbols (classes, functions, decorators)...',
-      progress: 55,
-      files_total: 24,
-      files_done: 18,
-    });
-  }, 2200);
-
-  setTimeout(() => {
-    updatePublicRepoStatus(repoId, {
-      state: 'graphing',
-      stage: 'Building dependency graph and symbol call hierarchy...',
-      progress: 80,
-      files_total: 24,
-      files_done: 24,
-    });
-  }, 3400);
-
-  setTimeout(() => {
-    updatePublicRepoStatus(repoId, {
-      state: 'embedding',
-      stage: 'Indexing code chunks for semantic and hybrid search...',
-      progress: 95,
-      files_total: 24,
-      files_done: 24,
-    });
-  }, 4400);
-
-  setTimeout(() => {
-    updatePublicRepoStatus(repoId, {
-      state: 'ready',
-      stage: `Repository ${owner}/${repo} successfully indexed. Ready for analysis.`,
-      progress: 100,
-      files_total: 24,
-      files_done: 24,
-    });
-  }, 5400);
-
   return newConnectedRepo;
 }
 
-function updatePublicRepoStatus(repoId: string, partial: Partial<IndexStatus>) {
+export function updatePublicRepoStatus(repoId: string, partial: Partial<IndexStatus>) {
   const entry = PUBLIC_REPOS_STORE.get(repoId);
   if (entry) {
     entry.status = {
@@ -465,6 +558,13 @@ function updatePublicRepoStatus(repoId: string, partial: Partial<IndexStatus>) {
  */
 export function getRegisteredPublicRepos(): ConnectedRepo[] {
   return Array.from(PUBLIC_REPOS_STORE.values()).map(v => v.repo);
+}
+
+/**
+ * Clear all registered public repos (used for test isolation).
+ */
+export function clearRegisteredPublicRepos(): void {
+  PUBLIC_REPOS_STORE.clear();
 }
 
 /**
@@ -495,54 +595,102 @@ export async function retryIndex(_repoId: string = 'repo-1'): Promise<IndexStatu
  * Get hierarchical directory file tree.
  */
 export async function getFileTree(_repoId?: string): Promise<TreeNode> {
-  if (!USE_MOCKS) {
-    const res = await fetch(`/api/repos/${_repoId || 'default'}/tree`);
-    if (!res.ok) throw await res.json();
-    return res.json();
+  const isDemo = !_repoId || _repoId === 'my-store' || _repoId === 'repo-1' || _repoId === 'default';
+
+  if (isDemo && USE_MOCKS) {
+    await simulateDelay();
+    checkSimulatedError();
+
+    const { forceEmpty } = getMockControlsState();
+    if (forceEmpty) {
+      return {
+        id: 'root',
+        name: 'empty-store',
+        path: '',
+        type: 'directory',
+        children: [],
+      };
+    }
+
+    return mockGetFileTree();
   }
 
-  await simulateDelay();
-  checkSimulatedError();
-
-  const { forceEmpty } = getMockControlsState();
-  if (forceEmpty) {
-    return {
-      id: 'root',
-      name: 'empty-store',
-      path: '',
-      type: 'directory',
-      children: [],
-    };
+  // Canonical identifier validation: missing owner metadata produces a clear error
+  if (!isDemo && _repoId && !_repoId.includes('/') && !_repoId.includes('__')) {
+    const pub = PUBLIC_REPOS_STORE.get(_repoId);
+    if (!pub) {
+      const match = Array.from(PUBLIC_REPOS_STORE.values()).find(p => p.repo.repo_name === _repoId);
+      if (!match) {
+        throw new Error(`Repository identifier "${_repoId}" is missing owner metadata. Expected 'owner/repo' format.`);
+      }
+    }
   }
 
-  return mockGetFileTree();
+  const targetId = _repoId || 'default';
+  const res = await fetch(`/api/repos/${encodeURIComponent(targetId)}/tree`);
+  if (!res.ok) {
+    let msg = `Failed to fetch repository tree (HTTP ${res.status})`;
+    try {
+      const err = await res.json();
+      if (err.detail) msg = err.detail;
+      else if (err.message) msg = err.message;
+    } catch {
+      // ignore
+    }
+    throw new Error(msg);
+  }
+  return res.json();
 }
 
 /**
  * Retrieve file source content by path.
  */
 export async function getFile(path: string, _repoId?: string): Promise<FileContent> {
-  if (!USE_MOCKS) {
-    const res = await fetch(`/api/repos/${_repoId || 'default'}/file?path=${encodeURIComponent(path)}`);
-    if (!res.ok) throw await res.json();
-    return res.json();
+  const isDemo = !_repoId || _repoId === 'my-store' || _repoId === 'repo-1' || _repoId === 'default';
+
+  if (isDemo && USE_MOCKS) {
+    await simulateDelay();
+    checkSimulatedError();
+
+    const file = mockGetFile(path);
+    if (!file) {
+      const err: ApiError = {
+        error: {
+          code: 'FILE_NOT_FOUND',
+          message: `File at path "${path}" was not found in the codebase.`,
+        },
+      };
+      throw err;
+    }
+
+    return file;
   }
 
-  await simulateDelay();
-  checkSimulatedError();
-
-  const file = mockGetFile(path);
-  if (!file) {
-    const err: ApiError = {
-      error: {
-        code: 'FILE_NOT_FOUND',
-        message: `File at path "${path}" was not found in the codebase.`,
-      },
-    };
-    throw err;
+  // Canonical identifier validation: missing owner metadata produces a clear error
+  if (!isDemo && _repoId && !_repoId.includes('/') && !_repoId.includes('__')) {
+    const pub = PUBLIC_REPOS_STORE.get(_repoId);
+    if (!pub) {
+      const match = Array.from(PUBLIC_REPOS_STORE.values()).find(p => p.repo.repo_name === _repoId);
+      if (!match) {
+        throw new Error(`Repository identifier "${_repoId}" is missing owner metadata. Expected 'owner/repo' format.`);
+      }
+    }
   }
 
-  return file;
+  const targetId = _repoId || 'default';
+  const res = await fetch(`/api/repos/${encodeURIComponent(targetId)}/file?path=${encodeURIComponent(path)}`);
+  if (!res.ok) {
+    let msg = `Failed to fetch file "${path}" (HTTP ${res.status})`;
+    try {
+      const err = await res.json();
+      if (err.detail) msg = err.detail;
+      else if (err.message) msg = err.message;
+    } catch {
+      // ignore
+    }
+    throw new Error(msg);
+  }
+  return res.json();
 }
 
 /**

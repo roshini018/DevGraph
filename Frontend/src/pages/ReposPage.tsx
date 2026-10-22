@@ -54,7 +54,14 @@ export interface ExtendedRepoItem {
 
 export const ReposPage: React.FC = () => {
   const navigate = useNavigate();
-  const { setSelectedRepo, user, disconnectGithub } = useAppStore();
+  const { setSelectedRepo, user, disconnectGithub, setActiveFile } = useAppStore();
+  // Helper: clear workspace state that belongs to the previous repo
+  const clearWorkspaceState = () => {
+    // We only need to clear the activeFile; the explorer will reload from
+    // the real tree once the new repo is selected.  Tabs are per-repo
+    // content and should not carry over.
+    setActiveFile(null);
+  };
 
   const [connectedRepos, setConnectedRepos] = useState<ConnectedRepo[]>([]);
   const [loading, setLoading] = useState(true);
@@ -78,6 +85,8 @@ export const ReposPage: React.FC = () => {
 
   const handleAnalyzePublicRepo = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isAnalyzingPublic) return;
+
     setPublicUrlError(null);
     setPublicSuccessMsg(null);
 
@@ -91,9 +100,11 @@ export const ReposPage: React.FC = () => {
     try {
       const connected = await analyzePublicRepo(publicRepoUrl);
       setConnectedRepos(prev => [connected, ...prev]);
-      setPublicSuccessMsg(`Repository ${connected.full_name} queued for indexing.`);
+      clearWorkspaceState();
       setSelectedRepo(connected);
-      navigate(`/repos/${connected.id}/indexing`);
+      // Navigate using the full_name slug (owner/repo) so the backend
+      // _resolve_public_repo can resolve it via owner/repo path split.
+      navigate(`/w/${encodeURIComponent(connected.full_name)}`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to analyze repository.';
       setPublicUrlError(msg);
@@ -120,7 +131,27 @@ export const ReposPage: React.FC = () => {
   };
 
   useEffect(() => {
-    fetchData();
+    let cancelled = false;
+    listRepos()
+      .then(connected => {
+        if (!cancelled) setConnectedRepos(connected);
+      })
+      .catch(err => {
+        if (!cancelled) {
+          const errorMsg =
+            err && typeof err === 'object' && 'error' in err
+              ? (err as { error: { message: string } }).error.message
+              : 'Failed to fetch repositories from GitHub';
+          setError(errorMsg);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   // Consolidate into Vercel-style unified repository list
@@ -196,20 +227,20 @@ export const ReposPage: React.FC = () => {
       status: 'not_indexed',
     });
 
-    // Any newly ingested public repositories
+    // Any newly ingested or connected repositories
     connectedRepos.forEach(cr => {
-      if (!items.some(it => it.id === cr.id || it.full_name === cr.full_name)) {
-        const parts = cr.full_name.split('/');
-        const owner = parts[0] || 'public';
-        const name = parts[1] || cr.repo_name;
+      if (!items.some(it => it.full_name === cr.full_name || it.id === cr.id)) {
+        const parts = cr.full_name ? cr.full_name.split('/') : [];
+        const owner = parts.length > 1 ? parts[0] : '';
+        const name = parts.length > 1 ? parts.slice(1).join('/') : cr.repo_name;
         items.unshift({
-          id: cr.id,
+          id: cr.full_name,
           full_name: cr.full_name,
           repo_name: name,
           owner: owner,
-          description: `Public repository (${cr.language}) indexed via public GitHub URL.`,
+          description: `Repository (${cr.language}) connected via GitHub.`,
           language: cr.language,
-          is_private: false,
+          is_private: Boolean((cr as { private?: boolean; is_private?: boolean }).private ?? (cr as { private?: boolean; is_private?: boolean }).is_private ?? false),
           updated_at: 'Just now',
           status: cr.status.state === 'ready' ? 'ready' : cr.status.state === 'failed' ? 'failed' : 'indexing',
           file_count: cr.file_count,
@@ -240,17 +271,36 @@ export const ReposPage: React.FC = () => {
   }, [allRepoItems, searchQuery, languageFilter, simulatedState]);
 
   const handleOpenWorkspace = (repo: ExtendedRepoItem) => {
-    // If connected repo matches, set it in store
-    const match = connectedRepos.find(r => r.repo_name === repo.repo_name);
-    if (match) setSelectedRepo(match);
-    navigate(`/w/${repo.repo_name}`);
+    // Find the matching ConnectedRepo (if any) and set it in the store.
+    const match = connectedRepos.find(
+      r => r.full_name === repo.full_name || r.repo_name === repo.repo_name
+    );
+    // Build a minimal ConnectedRepo from the ExtendedRepoItem if no match exists
+    const connectedRepo = match ?? {
+      id: repo.full_name,
+      repo_name: repo.repo_name,
+      full_name: repo.full_name,
+      branch: 'main',
+      status: { state: 'ready', stage: '', progress: 100, files_total: 0, files_done: 0, error: null, updated_at: new Date().toISOString() },
+      file_count: repo.file_count ?? 0,
+      symbol_count: repo.symbol_count ?? 0,
+      edge_count: 0,
+      language: repo.language,
+      updated_at: repo.updated_at,
+    };
+    // Clear stale workspace state from the previous repo before switching
+    clearWorkspaceState();
+    setSelectedRepo(connectedRepo);
+    // Navigate using the full_name slug (owner/repo) which the backend can
+    // resolve natively via _resolve_public_repo.
+    navigate(`/w/${encodeURIComponent(repo.full_name)}`);
   };
 
   const handleConfirmStartIndexing = () => {
     if (!confirmModalRepo) return;
     const repo = confirmModalRepo;
     setConfirmModalRepo(null);
-    navigate(`/repos/${repo.repo_name}/indexing`);
+    navigate(`/repos/${encodeURIComponent(repo.full_name)}/indexing`);
   };
 
   const getLanguageColor = (lang: string) => {
@@ -324,6 +374,7 @@ export const ReposPage: React.FC = () => {
             <input
               type="text"
               value={publicRepoUrl}
+              disabled={isAnalyzingPublic}
               onChange={e => {
                 setPublicRepoUrl(e.target.value);
                 if (publicUrlError) setPublicUrlError(null);
@@ -333,7 +384,7 @@ export const ReposPage: React.FC = () => {
                 publicUrlError
                   ? 'border-danger focus:border-danger'
                   : 'border-line hover:border-line-strong focus:border-green-bright'
-              }`}
+              } ${isAnalyzingPublic ? 'opacity-60 cursor-not-allowed' : ''}`}
             />
           </div>
           <Button
@@ -611,7 +662,7 @@ export const ReposPage: React.FC = () => {
                     <Button
                       variant="secondary"
                       size="sm"
-                      onClick={() => navigate(`/repos/${repo.repo_name}/indexing`)}
+                      onClick={() => navigate(`/repos/${encodeURIComponent(repo.full_name)}/indexing`)}
                       rightIcon={<ArrowRight className="w-3.5 h-3.5" />}
                     >
                       View progress

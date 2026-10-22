@@ -17,6 +17,7 @@ export interface GithubRepo {
 }
 
 export type IndexState =
+  | 'pending'
   | 'queued'
   | 'fetching'
   | 'parsing'

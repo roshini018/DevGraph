@@ -68,17 +68,28 @@ export const LeftExplorerPanel: React.FC = () => {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
 
-  const repoId = selectedRepo?.repo_name || 'my-store';
+  const repoId = selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'my-store';
+  const isMockDemo = repoId === 'my-store' || repoId === 'repo-1' || repoId === 'default';
 
   useEffect(() => {
     let isMounted = true;
-    getFileTree().then(t => {
-      if (isMounted) setTree(t);
+    getFileTree(repoId).then(t => {
+      if (isMounted) {
+        setTree(t);
+        if (t?.children && t.children.length > 0) {
+          const topLevelDirs = t.children.filter(c => c.type === 'directory').map(c => c.path);
+          if (topLevelDirs.length > 0) {
+            setExpandedPaths(prev => new Set([...prev, ...topLevelDirs]));
+          }
+        }
+      }
+    }).catch(err => {
+      console.error('Failed to load file tree:', err);
     });
     return () => {
       isMounted = false;
     };
-  }, []);
+  }, [repoId]);
 
   // Close context menu on click outside or escape
   useEffect(() => {
@@ -157,8 +168,8 @@ export const LeftExplorerPanel: React.FC = () => {
     const isExpanded = expandedPaths.has(node.path) || Boolean(filterQuery);
     const isActive = activeFile === node.path;
     const isMultiSelected = multiSelection.includes(node.path);
-    const isNotAnalyzed = node.name === 'README.md' || node.name === 'requirements.txt';
-    const connCount = CONNECTION_COUNTS[node.path];
+    const isNotAnalyzed = isMockDemo && (node.name === 'README.md' || node.name === 'requirements.txt');
+    const connCount = isMockDemo ? CONNECTION_COUNTS[node.path] : undefined;
 
     if (filterQuery && !nodeMatchesFilter(node, filterQuery)) {
       return null;

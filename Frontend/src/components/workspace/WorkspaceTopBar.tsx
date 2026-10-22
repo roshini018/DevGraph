@@ -41,9 +41,11 @@ export const WorkspaceTopBar: React.FC = () => {
     }
   }, [avatarMenuOpen]);
 
-  const repoId = selectedRepo?.repo_name || 'my-store';
+  const repoSlug = selectedRepo?.full_name
+    ? encodeURIComponent(selectedRepo.full_name)
+    : (selectedRepo?.repo_name || 'my-store');
   const orgName = selectedRepo?.full_name?.split('/')[0] || 'acme';
-  const repoName = selectedRepo?.repo_name || 'my-store';
+  const repoName = selectedRepo?.repo_name || selectedRepo?.full_name?.split('/')[1] || 'my-store';
 
   // Determine current active view tab
   const currentPath = location.pathname;
@@ -55,9 +57,9 @@ export const WorkspaceTopBar: React.FC = () => {
   }
 
   const handleTabClick = (tab: 'code' | 'graph' | 'impact') => {
-    if (tab === 'code') navigate(`/w/${repoId}`);
-    else if (tab === 'graph') navigate(`/w/${repoId}/graph`);
-    else if (tab === 'impact') navigate(`/w/${repoId}/impact`);
+    if (tab === 'code') navigate(`/w/${repoSlug}`);
+    else if (tab === 'graph') navigate(`/w/${repoSlug}/graph`);
+    else if (tab === 'impact') navigate(`/w/${repoSlug}/impact`);
   };
 
   const handleDisconnect = () => {

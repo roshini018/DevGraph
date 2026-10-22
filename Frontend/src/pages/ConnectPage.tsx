@@ -19,6 +19,7 @@ import {
   exchangeGithubCode,
   analyzePublicRepo,
   validateGithubUrl,
+  checkSession,
 } from '../api/client';
 
 type ConnectState = 'idle' | 'checking' | 'connecting' | 'success' | 'cancelled' | 'denied' | 'failed' | 'not_configured';
@@ -41,7 +42,7 @@ const GithubIcon: React.FC<{ className?: string }> = ({ className = 'w-4 h-4' })
 export const ConnectPage: React.FC = () => {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const { user, setUser } = useAppStore();
+  const { user, setUser, setSelectedRepo } = useAppStore();
 
   const [state, setState] = useState<ConnectState>(user ? 'success' : 'idle');
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
@@ -49,16 +50,22 @@ export const ConnectPage: React.FC = () => {
   // Option 2: Public repository URL inline input
   const [publicUrl, setPublicUrl] = useState('');
   const [publicUrlError, setPublicUrlError] = useState<string | null>(null);
+  const [publicInfoMessage, setPublicInfoMessage] = useState<string | null>(null);
   const [isAnalyzingPublic, setIsAnalyzingPublic] = useState(false);
 
-  // On mount: inspect URL callback parameters
-  useEffect(() => {
+  // Guard against React StrictMode double-invoking the exchange effect with the same single-use state/code
+  const isProcessingCallbackRef = React.useRef(false);
 
+  // On mount: inspect URL callback parameters or existing server session
+  useEffect(() => {
     const error = searchParams.get('error');
     const errorDescription = searchParams.get('error_description');
     const code = searchParams.get('code');
+    const stateParam = searchParams.get('state');
 
     if (error) {
+      // Strip error params from URL promptly
+      window.history.replaceState({}, document.title, window.location.pathname);
       if (error === 'access_denied') {
         setState('cancelled');
       } else {
@@ -69,18 +76,48 @@ export const ConnectPage: React.FC = () => {
     }
 
     if (code) {
+      // Avoid duplicate exchange caused by React 18 StrictMode double mount or component remount
+      if (isProcessingCallbackRef.current) {
+        return;
+      }
+
+      // Check session storage guard in case of genuine component remount with stale URL
+      const processedKey = `devgraph_oauth_code_${code}`;
+      if (sessionStorage.getItem(processedKey)) {
+        // Already processed or processing this exact code
+        return;
+      }
+
+      isProcessingCallbackRef.current = true;
+      sessionStorage.setItem(processedKey, 'processing');
+
+      // Strip OAuth query parameters immediately from the browser URL to keep URL clean
+      window.history.replaceState({}, document.title, window.location.pathname);
+
       setState('connecting');
-      exchangeGithubCode(code)
+      exchangeGithubCode(code, stateParam || undefined)
         .then(({ user: authUser }) => {
+          sessionStorage.setItem(processedKey, 'done');
           setUser(authUser);
           setState('success');
         })
         .catch(err => {
+          sessionStorage.removeItem(processedKey);
           setErrorMessage(err.message || 'OAuth token exchange failed');
           setState('failed');
         });
+      return;
     }
-  }, [searchParams, setUser]);
+
+    if (!user) {
+      checkSession().then(sess => {
+        if (sess.authenticated && sess.user) {
+          setUser(sess.user);
+          setState('success');
+        }
+      });
+    }
+  }, [searchParams, setUser, user]);
 
   const handleStartOAuth = async () => {
     setState('connecting');
@@ -104,13 +141,21 @@ export const ConnectPage: React.FC = () => {
   };
 
   const handleRetry = () => {
+    // Reset state and immediately initiate a fresh authorization flow with a new signed state
+    isProcessingCallbackRef.current = false;
     setState('idle');
     setErrorMessage(null);
+    setPublicUrlError(null);
+    setPublicInfoMessage(null);
+    handleStartOAuth();
   };
 
   const handleAnalyzePublicSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isAnalyzingPublic) return;
+
     setPublicUrlError(null);
+    setPublicInfoMessage(null);
 
     const validation = validateGithubUrl(publicUrl);
     if (!validation.valid) {
@@ -121,7 +166,8 @@ export const ConnectPage: React.FC = () => {
     setIsAnalyzingPublic(true);
     try {
       const repo = await analyzePublicRepo(publicUrl);
-      navigate(`/repos/${repo.id}/indexing`);
+      setSelectedRepo(repo);
+      navigate(`/w/${encodeURIComponent(repo.full_name || repo.id)}`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to analyze repository.';
       setPublicUrlError(msg);
@@ -153,7 +199,7 @@ export const ConnectPage: React.FC = () => {
         <div className="p-3 rounded bg-raised/60 border border-line flex items-start gap-2.5 text-xs">
           <Lock className="w-3.5 h-3.5 text-green-bright shrink-0 mt-0.5" />
           <div className="text-subtle text-[11px] leading-relaxed">
-            <span className="text-text font-medium">Read-only guarantee:</span> DevGraph uses read-only access. Your source code is analyzed statically and never executed or persistently stored on third-party servers.
+            DevGraph reads your code with read-only access and never runs it. Indexed code snippets are stored in the project's database to answer your questions.
           </div>
         </div>
 
@@ -346,21 +392,35 @@ export const ConnectPage: React.FC = () => {
                 <input
                   type="text"
                   value={publicUrl}
+                  disabled={isAnalyzingPublic}
                   onChange={e => {
                     setPublicUrl(e.target.value);
                     if (publicUrlError) setPublicUrlError(null);
+                    if (publicInfoMessage) setPublicInfoMessage(null);
                   }}
                   placeholder="https://github.com/owner/repo"
                   className={`w-full bg-raised border rounded-md pl-8 pr-3 py-2 text-xs text-text placeholder:text-subtle font-mono outline-none transition-colors ${
                     publicUrlError
                       ? 'border-danger focus:border-danger'
                       : 'border-line hover:border-line-strong focus:border-green-bright'
-                  }`}
+                  } ${isAnalyzingPublic ? 'opacity-60 cursor-not-allowed' : ''}`}
                 />
               </div>
 
               {publicUrlError && (
                 <p className="text-[11px] text-danger font-mono pl-1">{publicUrlError}</p>
+              )}
+
+              {publicInfoMessage && (
+                <div className="p-3 rounded bg-amber/10 border border-amber/30 text-xs space-y-1">
+                  <div className="flex items-center gap-2 text-amber font-medium">
+                    <AlertTriangle className="w-4 h-4 shrink-0" />
+                    <span>Repository Validated</span>
+                  </div>
+                  <p className="text-[11px] text-muted pl-6 leading-relaxed">
+                    {publicInfoMessage}
+                  </p>
+                </div>
               )}
 
               <Button
