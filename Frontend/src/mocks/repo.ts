@@ -20,7 +20,6 @@ import type {
   SearchResult,
   SearchMatch,
   AskResult,
-  Citation,
 } from '../types/api';
 
 export const MOCK_GITHUB_REPOS: GithubRepo[] = [
@@ -1639,11 +1638,43 @@ export function getNeighborhood(
 }
 
 /**
+ * Helper to resolve an ID (symbol or file) to matching symbol IDs.
+ */
+function resolveToSymbols(id: string): string[] {
+  if (MOCK_SYMBOLS.some(s => s.id === id)) {
+    return [id];
+  }
+  const matchingFile = MOCK_FILES.find(
+    f => f.path === id || f.path.endsWith('/' + id) || f.path.endsWith(id)
+  );
+  if (matchingFile) {
+    return MOCK_SYMBOLS.filter(s => s.file === matchingFile.path).map(s => s.id);
+  }
+  return [id];
+}
+
+/**
  * Performs impact analysis for targetIds.
  * Rule: NEVER includes a target in its own results and de-duplicates by shortest distance.
  */
 export function getImpact(targetIds: string[], depth: number = 3): ImpactResult {
   const targetSet = new Set<string>(targetIds);
+  const initialNodes: string[] = [];
+
+  for (const tid of targetIds) {
+    const syms = resolveToSymbols(tid);
+    for (const sym of syms) {
+      targetSet.add(sym);
+      initialNodes.push(sym);
+    }
+    const matchingFile = MOCK_FILES.find(
+      f => f.path === tid || f.path.endsWith('/' + tid) || f.path.endsWith(tid)
+    );
+    if (matchingFile) {
+      targetSet.add(matchingFile.path);
+    }
+  }
+
   // Map of impacted node ID -> { distance, path }
   const shortest = new Map<string, { distance: number; path: string[] }>();
 
@@ -1651,8 +1682,8 @@ export function getImpact(targetIds: string[], depth: number = 3): ImpactResult 
   // We traverse incoming edges (callers/dependents that call or rely on this target)
   const queue: Array<{ nodeId: string; distance: number; path: string[] }> = [];
 
-  for (const tid of targetIds) {
-    queue.push({ nodeId: tid, distance: 0, path: [tid] });
+  for (const nid of initialNodes) {
+    queue.push({ nodeId: nid, distance: 0, path: [nid] });
   }
 
   while (queue.length > 0) {
@@ -1705,18 +1736,21 @@ export function getImpact(targetIds: string[], depth: number = 3): ImpactResult 
 }
 
 /**
- * Finds all simple directed paths between two symbols up to maxDepth.
+ * Finds all simple directed paths between two symbols or files up to maxDepth.
  */
 export function findPaths(
   sourceId: string,
   targetId: string,
   maxDepth: number = 6
 ): string[][] {
+  const sourceSymbols = resolveToSymbols(sourceId);
+  const targetSymbols = resolveToSymbols(targetId);
+
   const results: string[][] = [];
 
-  function dfs(current: string, path: string[], visited: Set<string>) {
+  function dfs(current: string, dest: string, path: string[], visited: Set<string>) {
     if (path.length > maxDepth) return;
-    if (current === targetId) {
+    if (current === dest) {
       results.push([...path]);
       return;
     }
@@ -1724,14 +1758,20 @@ export function findPaths(
     for (const edge of MOCK_EDGES) {
       if (edge.source === current && !visited.has(edge.target)) {
         visited.add(edge.target);
-        dfs(edge.target, [...path, edge.target], visited);
+        dfs(edge.target, dest, [...path, edge.target], visited);
         visited.delete(edge.target);
       }
     }
   }
 
-  const visited = new Set<string>([sourceId]);
-  dfs(sourceId, [sourceId], visited);
+  for (const src of sourceSymbols) {
+    for (const tgt of targetSymbols) {
+      if (src === tgt) continue;
+      const visited = new Set<string>([src]);
+      dfs(src, tgt, [src], visited);
+    }
+  }
+
   return results;
 }
 
@@ -1945,34 +1985,219 @@ export function getConnection(sourceId: string, targetId: string): ConnectionRes
 
 /**
  * Simulates AI codebase Q&A with citations.
+ * Keyword answers for five questions with 1 to 3 real citations from the mock repo and verified true.
+ * Anything else returns verified false, no citations, and 'Not enough evidence in this repository to answer reliably.'
  */
 export function ask(question: string): AskResult {
-  const querySummary = question.trim() ? ` regarding "${question.trim()}"` : '';
-  const citations: Citation[] = [
-    {
-      id: 'cit-1',
-      file_path: 'src/api/orders.py',
-      start_line: 8,
-      end_line: 18,
-      symbol: 'place_order',
-      snippet: 'def place_order(payload: Dict[str, Any]) -> Dict[str, Any]:\\n    order = create_order(...)',
-      sources: ['AST Call Graph', 'Source Parser'],
-    },
-    {
-      id: 'cit-2',
-      file_path: 'src/services/payment_service.py',
-      start_line: 14,
-      end_line: 23,
-      symbol: 'charge_payment',
-      snippet: 'def charge_payment(order_id: str, amount: float, ...):\\n    validate_amount(amount)',
-      sources: ['Symbol Graph'],
-    },
-  ];
+  const q = question.toLowerCase().trim();
 
+  // 1. Explain this file / overview
+  if (
+    q.includes('explain') ||
+    q.includes('overview') ||
+    q.includes('orders.py') ||
+    q.includes('explain this file') ||
+    q.includes('file summary')
+  ) {
+    return {
+      answer:
+        'src/api/orders.py exposes the primary HTTP entry points for customer order dispatch. It parses and validates user payloads before delegating order orchestration to create_order in src/services/order_service.py. The pipeline validates order UUIDs, checks line item amounts, and initiates settlement through payment_service.py.',
+      verified: true,
+      citations: [
+        {
+          id: 'cit-explain-1',
+          file_path: 'src/api/orders.py',
+          start_line: 14,
+          end_line: 38,
+          symbol: 'place_order',
+          snippet:
+            'def place_order(payload: Dict[str, Any]) -> Dict[str, Any]:\n    user_id = payload.get("user_id")\n    order = create_order(user_id, amount)',
+          sources: ['AST Call Graph', 'Source Parser'],
+        },
+        {
+          id: 'cit-explain-2',
+          file_path: 'src/services/order_service.py',
+          start_line: 18,
+          end_line: 32,
+          symbol: 'create_order',
+          snippet:
+            'def create_order(user_id: str, items: List[Dict[str, Any]], payment_method: Dict[str, Any]) -> Order:\n    validate_uuid(user_id)\n    order = Order(id=f"ord_{user_id}", user_id=user_id, items=items)',
+          sources: ['Symbol Graph'],
+        },
+      ],
+      latency_ms: 120,
+    };
+  }
+
+  // 2. Who calls this function / callers
+  if (
+    q.includes('who calls') ||
+    q.includes('caller') ||
+    q.includes('callers') ||
+    q.includes('call hierarchy') ||
+    q.includes('incoming call')
+  ) {
+    return {
+      answer:
+        'Based on AST call graph analysis, place_order is called by integration test suites in tests/test_orders.py (test_place_order_success and test_place_order_invalid_amount). In turn, place_order acts as the top-level orchestrator calling create_order and validate_uuid.',
+      verified: true,
+      citations: [
+        {
+          id: 'cit-callers-1',
+          file_path: 'tests/test_orders.py',
+          start_line: 12,
+          end_line: 24,
+          symbol: 'test_place_order_success',
+          snippet:
+            'def test_place_order_success():\n    payload = {"user_id": "usr-1", "amount": 99.50}\n    res = place_order(payload)',
+          sources: ['AST Test Visitor'],
+        },
+        {
+          id: 'cit-callers-2',
+          file_path: 'src/api/orders.py',
+          start_line: 28,
+          end_line: 36,
+          symbol: 'place_order',
+          snippet:
+            'order = create_order(user_id, amount)\nreturn {"order_id": order.id, "status": "paid"}',
+          sources: ['Symbol Graph'],
+        },
+      ],
+      latency_ms: 95,
+    };
+  }
+
+  // 3. What depends on this module / dependencies / imports
+  if (
+    q.includes('what depends') ||
+    q.includes('depends') ||
+    q.includes('dependency') ||
+    q.includes('dependencies') ||
+    q.includes('imports') ||
+    q.includes('module')
+  ) {
+    return {
+      answer:
+        'Module dependency tracing reveals that src/utils/validators.py is the primary central utility hub, imported by order_service.py, payment_service.py, and user.py. Furthermore, order_service.py depends on models/order.py, payment_service.py, and notification_service.py.',
+      verified: true,
+      citations: [
+        {
+          id: 'cit-depends-1',
+          file_path: 'src/services/order_service.py',
+          start_line: 2,
+          end_line: 8,
+          symbol: 'create_order',
+          snippet:
+            'from src.utils.validators import validate_uuid, validate_amount\nfrom src.services.payment_service import charge_payment',
+          sources: ['Module Import Resolver'],
+        },
+        {
+          id: 'cit-depends-2',
+          file_path: 'src/services/payment_service.py',
+          start_line: 2,
+          end_line: 6,
+          symbol: 'charge_payment',
+          snippet:
+            'from src.utils.validators import validate_amount, validate_currency\nfrom src.models.payment import Payment',
+          sources: ['Module Import Resolver'],
+        },
+      ],
+      latency_ms: 110,
+    };
+  }
+
+  // 4. What might break if I change this function / impact / blast radius
+  if (
+    q.includes('break') ||
+    q.includes('what if i change') ||
+    q.includes('change') ||
+    q.includes('blast radius') ||
+    q.includes('impact') ||
+    q.includes('modify')
+  ) {
+    return {
+      answer:
+        'Impact analysis computes a High-Risk blast radius of 4 hops if validate_amount is modified. Downstream dependents include create_order (order_service.py), charge_payment (payment_service.py), and test_validate_amount. Altering the return signature or validation threshold will disrupt both order creation and payment authorization.',
+      verified: true,
+      citations: [
+        {
+          id: 'cit-impact-1',
+          file_path: 'src/utils/validators.py',
+          start_line: 12,
+          end_line: 24,
+          symbol: 'validate_amount',
+          snippet:
+            'def validate_amount(amount: float) -> bool:\n    if amount <= 0:\n        return False\n    return True',
+          sources: ['Blast Radius Engine'],
+        },
+        {
+          id: 'cit-impact-2',
+          file_path: 'src/services/order_service.py',
+          start_line: 22,
+          end_line: 30,
+          symbol: 'create_order',
+          snippet:
+            'validate_order_items(items)\nvalidate_amount(order.total)\ncharge_payment(order.id, order.total, payment_method)',
+          sources: ['AST Call Graph'],
+        },
+        {
+          id: 'cit-impact-3',
+          file_path: 'src/services/payment_service.py',
+          start_line: 18,
+          end_line: 26,
+          symbol: 'charge_payment',
+          snippet:
+            'if not validate_amount(amount):\n    raise ValueError("Invalid payment amount specified")',
+          sources: ['AST Call Graph'],
+        },
+      ],
+      latency_ms: 140,
+    };
+  }
+
+  // 5. Payment processing flow / Stripe
+  if (
+    q.includes('payment') ||
+    q.includes('charge') ||
+    q.includes('stripe') ||
+    q.includes('checkout') ||
+    q.includes('transaction')
+  ) {
+    return {
+      answer:
+        'Payment processing is handled by charge_payment in src/services/payment_service.py. It masks sensitive payment payload data, verifies currency codes, invokes validate_amount, and constructs a Payment model instance before recording settlement.',
+      verified: true,
+      citations: [
+        {
+          id: 'cit-payment-1',
+          file_path: 'src/services/payment_service.py',
+          start_line: 14,
+          end_line: 32,
+          symbol: 'charge_payment',
+          snippet:
+            'def charge_payment(order_id: str, amount: float, payment_method: Dict[str, Any]) -> Payment:\n    if not validate_amount(amount):\n        raise ValueError("Invalid payment amount")\n    payment = Payment(id=f"pay_{order_id}", order_id=order_id, amount=amount)',
+          sources: ['Source Parser', 'AST Call Graph'],
+        },
+        {
+          id: 'cit-payment-2',
+          file_path: 'src/models/payment.py',
+          start_line: 8,
+          end_line: 20,
+          symbol: 'Payment',
+          snippet:
+            'class Payment(BaseModel):\n    def __init__(self, id: str, order_id: str, amount: float, currency: str = "USD"):\n        validate_amount(amount)\n        self.status = "created"',
+          sources: ['Class Hierarchy AST'],
+        },
+      ],
+      latency_ms: 115,
+    };
+  }
+
+  // Fallback for anything else: verified false, no citations
   return {
-    answer: `AI-generated: The checkout workflow${querySummary} begins in place_order (src/api/orders.py), delegates to create_order (src/services/order_service.py), and settles transactions through charge_payment (src/services/payment_service.py) while validating amounts via validate_amount.`,
-    verified: true,
-    citations,
-    latency_ms: 480,
+    answer: 'Not enough evidence in this repository to answer reliably.',
+    verified: false,
+    citations: [],
+    latency_ms: 60,
   };
 }

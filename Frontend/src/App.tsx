@@ -1,25 +1,73 @@
 import React from 'react';
-import { MockControlsPanel } from './components/MockControlsPanel';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { LandingPage } from './pages/LandingPage';
+import { ConnectPage } from './pages/ConnectPage';
+import { ReposPage } from './pages/ReposPage';
+import { IndexingPage } from './pages/IndexingPage';
+import { WorkspaceLayout } from './components/workspace/WorkspaceLayout';
+import { CodeViewPage } from './pages/workspace/CodeViewPage';
+import { GraphViewPage } from './pages/workspace/GraphViewPage';
+import { ImpactViewPage } from './pages/workspace/ImpactViewPage';
+import { ConnectionsViewPage } from './pages/workspace/ConnectionsViewPage';
+import { AssistantViewPage } from './pages/workspace/AssistantViewPage';
+import { RequireAuth, RequireRepo } from './routes/guards';
+import { GettingStartedPage } from './pages/docs/GettingStartedPage';
+import { ArchitecturePage } from './pages/docs/ArchitecturePage';
+import { SpecificationsPage } from './pages/docs/SpecificationsPage';
+
 
 export const App: React.FC = () => {
   return (
-    <div className="min-h-screen bg-bg text-text flex flex-col items-center justify-center p-6 selection:bg-green-soft selection:text-green-bright">
-      <div className="max-w-md w-full border border-line bg-surface p-6 rounded-lg text-center space-y-3">
-        <div className="inline-flex items-center gap-2 px-2.5 py-1 rounded bg-raised border border-line text-xs font-mono text-muted">
-          <span className="w-2 h-2 rounded-full bg-green-bright animate-pulse" />
-          DevGraph Foundation Ready
-        </div>
-        <h1 className="text-xl font-semibold tracking-tight text-text">
-          Phase 0: Foundation
-        </h1>
-        <p className="text-sm text-subtle">
-          Mock repository <span className="font-mono text-muted">acme/my-store</span> loaded with 16 analyzed Python files, 54 symbols, 90 edges, and full test suite passing.
-        </p>
-      </div>
+    <BrowserRouter>
+      <Routes>
+        {/* Public Routes */}
+        <Route path="/" element={<LandingPage />} />
+        <Route path="/connect" element={<ConnectPage />} />
+        <Route path="/docs/getting-started" element={<GettingStartedPage />} />
+        <Route path="/docs/architecture" element={<ArchitecturePage />} />
+        <Route path="/docs/specifications" element={<SpecificationsPage />} />
 
-      {/* Floating dev mock controls panel */}
-      <MockControlsPanel />
-    </div>
+        {/* Protected Repository Routes */}
+        <Route
+          path="/repos"
+          element={
+            <RequireAuth>
+              <ReposPage />
+            </RequireAuth>
+          }
+        />
+        <Route
+          path="/repos/:repoId/indexing"
+          element={
+            <RequireAuth>
+              <IndexingPage />
+            </RequireAuth>
+          }
+        />
+
+        {/* Protected Workspace Routes (Layout with center outlet) */}
+        <Route
+          path="/w/:repoId"
+          element={
+            <RequireAuth>
+              <RequireRepo>
+                <WorkspaceLayout />
+              </RequireRepo>
+            </RequireAuth>
+          }
+        >
+          <Route index element={<CodeViewPage />} />
+          <Route path="graph" element={<GraphViewPage />} />
+          <Route path="impact" element={<ImpactViewPage />} />
+          <Route path="connections" element={<ConnectionsViewPage />} />
+          <Route path="assistant" element={<AssistantViewPage />} />
+        </Route>
+
+        {/* Fallback */}
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+
+    </BrowserRouter>
   );
 };
 

@@ -66,6 +66,8 @@ export interface FileContent {
   lines: number;
   analyzed: boolean;
   symbols?: string[];
+  size_bytes?: number;
+  summary?: string;
 }
 
 export type SymbolKind = 'function' | 'class' | 'method' | 'variable' | 'file';
@@ -96,6 +98,7 @@ export interface GraphEdge {
   line: number;
   resolved: boolean;
   count?: number; // Aggregated edge count when used in file graph
+  is_heuristic?: boolean;
 }
 
 export interface NodeDetail {
