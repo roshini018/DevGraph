@@ -1,3 +1,59 @@
+@import '@fontsource-variable/geist';
+@import '@fontsource-variable/geist-mono';
+
 @tailwind base;
 @tailwind components;
 @tailwind utilities;
+
+@layer base {
+  :root {
+    color-scheme: dark;
+  }
+
+  html {
+    background-color: #0A0A0A;
+    color: #EDEDED;
+    font-family: 'Geist Sans Variable', 'Geist Sans', Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+  }
+
+  body {
+    background-color: #0A0A0A;
+    color: #EDEDED;
+    font-family: 'Geist Sans Variable', 'Geist Sans', Inter, -apple-system, BlinkMacSystemFont, sans-serif;
+    letter-spacing: -0.01em;
+    -webkit-font-smoothing: antialiased;
+    -moz-osx-font-smoothing: grayscale;
+    min-height: 100vh;
+    margin: 0;
+    padding: 0;
+  }
+
+  /* 1px hairline border default */
+  *,
+  ::before,
+  ::after {
+    border-color: #262626;
+  }
+
+  /* Focus ring: 2px green-bright with offset */
+  *:focus-visible {
+    outline: none !important;
+    box-shadow: 0 0 0 2px #0A0A0A, 0 0 0 4px #00EA64 !important;
+  }
+
+  /* Large tight headlines */
+  h1, h2, h3, h4, h5, h6 {
+    letter-spacing: -0.03em;
+    font-weight: 600;
+  }
+
+  /* Code and numbers monospace */
+  code, kbd, samp, pre {
+    font-family: 'Geist Mono Variable', 'Geist Mono', 'JetBrains Mono', monospace;
+  }
+
+  /* Lucide icon default stroke */
+  svg.lucide {
+    stroke-width: 1.5px;
+  }
+}
