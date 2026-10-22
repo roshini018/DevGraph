@@ -140,7 +140,21 @@ export const useAppStore = create<AppState>()(
       panelStates: DEFAULT_PANEL_STATES,
 
       setUser: user => set({ user }),
-      setSelectedRepo: repo => set({ selectedRepo: repo }),
+      setSelectedRepo: repo => {
+        const current = get().selectedRepo;
+        // When switching to a different repository, clear file/tab state that
+        // belongs to the previous repo to avoid stale file loads.
+        const isNewRepo =
+          repo !== null &&
+          current !== null &&
+          current.full_name !== repo.full_name &&
+          current.id !== repo.id;
+        if (isNewRepo) {
+          set({ selectedRepo: repo, openTabs: [], activeFile: null, highlightRange: null });
+        } else {
+          set({ selectedRepo: repo });
+        }
+      },
 
       openTab: filePath => {
         const { openTabs } = get();

@@ -117,8 +117,13 @@ export const CodeViewPage: React.FC = () => {
     setRightOpen,
   } = useAppStore();
 
-  const repoId = selectedRepo?.repo_name || 'my-store';
+  // Prefer full_name ("owner/repo") as the repo identifier because the backend
+  // _resolve_public_repo understands owner/repo slugs natively.  Numeric GitHub
+  // IDs (which selectedRepo.id previously held for OAuth repos) are NOT
+  // resolvable by the backend and produced 404 errors.
+  const repoId = selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'my-store';
   const orgName = selectedRepo?.full_name?.split('/')[0] || 'acme';
+  const isMockDemo = repoId === 'my-store' || repoId === 'repo-1' || repoId === 'default';
 
   const [fileData, setFileData] = useState<FileContent | null>(null);
   const [loading, setLoading] = useState(false);
@@ -146,7 +151,7 @@ export const CodeViewPage: React.FC = () => {
   // Bottom Panel State (200px collapsible)
   const [bottomPanelOpen, setBottomPanelOpen] = useState(true);
   const [bottomTab, setBottomTab] = useState<'callers' | 'callees' | 'unresolved'>('callers');
-  const [activeFunctionSymbol, setActiveFunctionSymbol] = useState<string>('place_order');
+  const [activeFunctionSymbol, setActiveFunctionSymbol] = useState<string>(isMockDemo ? 'place_order' : '');
 
   // Ref to code lines container for smooth auto-scroll on openFile
   const lineRefs = useRef<Map<number, HTMLDivElement>>(new Map());
@@ -182,13 +187,17 @@ export const CodeViewPage: React.FC = () => {
     setLoading(true);
     setError(null);
 
-    getFile(activeFile)
+    getFile(activeFile, repoId)
       .then(f => {
         if (isMounted) {
           setFileData(f);
           // Set first symbol as active function if available
           if (f.symbols && f.symbols.length > 0) {
             setActiveFunctionSymbol(f.symbols[0]);
+          } else if (isMockDemo) {
+            setActiveFunctionSymbol('place_order');
+          } else {
+            setActiveFunctionSymbol('');
           }
         }
       })
@@ -197,6 +206,8 @@ export const CodeViewPage: React.FC = () => {
           const msg =
             err && typeof err === 'object' && 'error' in err
               ? (err as { error: { message: string } }).error.message
+              : err instanceof Error
+              ? err.message
               : 'Failed to read file content';
           setError(msg);
         }
@@ -208,7 +219,7 @@ export const CodeViewPage: React.FC = () => {
     return () => {
       isMounted = false;
     };
-  }, [activeFile]);
+  }, [activeFile, repoId]);
 
   // Handle openFile target scrolling & brief highlight
   useEffect(() => {
@@ -316,6 +327,7 @@ export const CodeViewPage: React.FC = () => {
 
   // Check if line defines a function
   const getFunctionAtLine = (lineNum: number) => {
+    if (!isMockDemo) return null;
     const sym = MOCK_SYMBOLS.find(
       s => s.file === activeFile && (s.kind === 'function' || s.kind === 'method') && s.start_line === lineNum
     );
@@ -457,7 +469,11 @@ export const CodeViewPage: React.FC = () => {
               <span>•</span>
               <span>{fileData?.language || 'Python'}</span>
               <span>•</span>
-              <span className="text-green-bright font-medium">AST Indexed</span>
+              {isMockDemo ? (
+                <span className="text-green-bright font-medium">AST Indexed</span>
+              ) : (
+                <span className="text-subtle font-medium">GitHub Source</span>
+              )}
             </div>
           </div>
         </div>
@@ -730,7 +746,13 @@ export const CodeViewPage: React.FC = () => {
             {/* Right Controls: active function name & toggle expand */}
             <div className="flex items-center gap-2">
               <span className="text-[11px] text-muted">
-                Active: <span className="text-green-bright font-semibold">{activeFunctionSymbol}</span>
+                {isMockDemo ? (
+                  <>
+                    Active: <span className="text-green-bright font-semibold">{activeFunctionSymbol}</span>
+                  </>
+                ) : (
+                  <span className="text-subtle">Real Repository Code</span>
+                )}
               </span>
               <button
                 type="button"
@@ -753,7 +775,11 @@ export const CodeViewPage: React.FC = () => {
               {/* TAB 1: CALLERS */}
               {bottomTab === 'callers' && (
                 <div className="space-y-1.5">
-                  {currentRelations.callers.length === 0 ? (
+                  {!isMockDemo ? (
+                    <div className="text-subtle text-xs p-2">
+                      Repository source code loaded directly from GitHub. Graph extraction and callers analysis will be available once repository indexing is run.
+                    </div>
+                  ) : currentRelations.callers.length === 0 ? (
                     <div className="text-subtle text-xs p-2">
                       No incoming callers detected in the AST graph for {activeFunctionSymbol}.
                     </div>

@@ -113,7 +113,7 @@ export const IndexingPage: React.FC = () => {
 
   // Elapsed timer increment every 1 second
   useEffect(() => {
-    const isFinished = status?.state === 'ready' || status?.state === 'failed';
+    const isFinished = status?.state === 'ready' || status?.state === 'failed' || status?.state === 'pending';
     if (isFinished) return;
 
     const timer = setInterval(() => {
@@ -140,14 +140,38 @@ export const IndexingPage: React.FC = () => {
   };
 
   const handleOpenWorkspace = () => {
+    const decodedRepoId = decodeURIComponent(repoId);
     const publicRepos = getRegisteredPublicRepos();
-    const found = publicRepos.find(r => r.id === repoId || r.repo_name === repoId);
+    const found = publicRepos.find(
+      r =>
+        r.id === repoId ||
+        r.repo_name === repoId ||
+        r.full_name === repoId ||
+        r.id === decodedRepoId ||
+        r.repo_name === decodedRepoId ||
+        r.full_name === decodedRepoId
+    );
     if (found) {
       setSelectedRepo(found);
-    } else {
-      setSelectedRepo(MOCK_CONNECTED_REPO);
+      navigate(`/w/${encodeURIComponent(found.full_name)}`);
+      return;
     }
-    navigate(`/w/${repoId}`);
+    const currentSelected = useAppStore.getState().selectedRepo;
+    if (
+      currentSelected &&
+      (currentSelected.full_name === decodedRepoId ||
+        currentSelected.repo_name === decodedRepoId ||
+        currentSelected.id === decodedRepoId)
+    ) {
+      navigate(`/w/${encodeURIComponent(currentSelected.full_name)}`);
+      return;
+    }
+    if (decodedRepoId === 'my-store' || decodedRepoId === 'acme/my-store') {
+      setSelectedRepo(MOCK_CONNECTED_REPO);
+      navigate(`/w/my-store`);
+      return;
+    }
+    navigate(`/w/${encodeURIComponent(decodedRepoId)}`);
   };
 
   // Derive active step index
@@ -191,6 +215,14 @@ export const IndexingPage: React.FC = () => {
         <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-danger/10 border border-danger/30 text-danger font-mono text-xs font-semibold">
           <StatusDot status="failed" />
           <span>Failed</span>
+        </span>
+      );
+    }
+    if (status?.state === 'pending') {
+      return (
+        <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-amber/10 border border-amber/30 text-amber font-mono text-xs font-semibold">
+          <Clock className="w-3.5 h-3.5 text-amber" />
+          <span>Pending Ingestion</span>
         </span>
       );
     }
