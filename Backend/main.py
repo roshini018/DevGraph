@@ -8,6 +8,8 @@ from pathlib import Path
 
 import httpx
 from app.config import configure_tls, get_settings
+from app.routes.graph import graph_router
+from app.routes.parse import parse_router
 from fastapi import FastAPI, Request, Response, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import RedirectResponse
@@ -65,6 +67,8 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="DevGraph API", lifespan=lifespan)
+app.include_router(parse_router)
+app.include_router(graph_router)
 
 # Configure CORS using origins defined in Settings
 settings = get_settings()
@@ -839,6 +843,20 @@ def _is_binary_path(path: str) -> bool:
     return ext in _BINARY_EXTENSIONS
 
 
+def _get_github_headers(token: str | None = None) -> dict[str, str]:
+    """Provide headers with authentication for elevated GitHub API limits (5,000 req/hr)."""
+    headers = {"Accept": "application/vnd.github.v3+json"}
+    if token:
+        headers["Authorization"] = f"token {token}"
+    else:
+        settings = get_settings()
+        if settings.GITHUB_CLIENT_ID and settings.GITHUB_CLIENT_SECRET:
+            user_pass = f"{settings.GITHUB_CLIENT_ID}:{settings.GITHUB_CLIENT_SECRET.get_secret_value()}"
+            b64_val = base64.b64encode(user_pass.encode()).decode()
+            headers["Authorization"] = f"Basic {b64_val}"
+    return headers
+
+
 async def _resolve_public_repo(
     repo_id: str, access_token: str | None = None, session: dict | None = None
 ) -> tuple[str, str, str]:
@@ -888,9 +906,7 @@ async def _resolve_public_repo(
     else:
         raise HTTPException(status_code=404, detail=f"Repository '{repo_id}' not found.")
 
-    req_headers = {"Accept": "application/vnd.github.v3+json"}
-    if access_token:
-        req_headers["Authorization"] = f"token {access_token}"
+    req_headers = _get_github_headers(access_token)
 
     try:
         async with httpx.AsyncClient(timeout=10.0) as http:
@@ -945,9 +961,7 @@ async def api_repos_tree(repo_id: str, request: Request):
     owner, repo, default_branch = await _resolve_public_repo(repo_id, token, sess)
 
     tree_url = f"{_GITHUB_PUBLIC_REPO_URL}/{owner}/{repo}/git/trees/{default_branch}"
-    req_headers = {"Accept": "application/vnd.github.v3+json"}
-    if token:
-        req_headers["Authorization"] = f"token {token}"
+    req_headers = _get_github_headers(token)
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as http:
@@ -1087,16 +1101,15 @@ async def api_repos_status(repo_id: str, request: Request):
     }
 
 
-@app.get("/api/repos/{repo_id:path}/file")
-async def api_repos_file(
+async def _fetch_repo_file_content(
     repo_id: str,
+    path: str,
     request: Request,
-    path: str = Query(..., description="File path within repository"),
-):
+) -> tuple[str, str, int, str]:
     """Fetch raw text file content from a public or authorized private repository.
 
     Validates path, checks for oversized or binary files, and retrieves
-    clean text content via GitHub's public API. Never executes fetched code.
+    clean text content via GitHub's public API. Returns (clean_path, text_content, file_size, language).
     """
     clean_path = path.strip().lstrip("/")
     if not clean_path:
@@ -1116,9 +1129,7 @@ async def api_repos_file(
     owner, repo, default_branch = await _resolve_public_repo(repo_id, token, sess)
 
     content_url = f"{_GITHUB_PUBLIC_REPO_URL}/{owner}/{repo}/contents/{clean_path}"
-    req_headers = {"Accept": "application/vnd.github.v3+json"}
-    if token:
-        req_headers["Authorization"] = f"token {token}"
+    req_headers = _get_github_headers(token)
 
     try:
         async with httpx.AsyncClient(timeout=15.0) as http:
@@ -1183,8 +1194,25 @@ async def api_repos_file(
     except UnicodeDecodeError:
         text_content = content_bytes.decode("utf-8", errors="replace")
 
-    lines_count = len(text_content.splitlines()) if text_content else 0
     language = _detect_language(clean_path)
+    return clean_path, text_content, file_size, language
+
+
+@app.get("/api/repos/{repo_id:path}/file")
+async def api_repos_file(
+    repo_id: str,
+    request: Request,
+    path: str = Query(..., description="File path within repository"),
+):
+    """Fetch raw text file content from a public or authorized private repository.
+
+    Validates path, checks for oversized or binary files, and retrieves
+    clean text content via GitHub's public API. Never executes fetched code.
+    """
+    clean_path, text_content, file_size, language = await _fetch_repo_file_content(
+        repo_id, path, request
+    )
+    lines_count = len(text_content.splitlines()) if text_content else 0
 
     return {
         "path": clean_path,
@@ -1195,6 +1223,7 @@ async def api_repos_file(
         "symbols": [],
         "size_bytes": file_size,
     }
+
 
 
 # ---------------------------------------------------------------------------

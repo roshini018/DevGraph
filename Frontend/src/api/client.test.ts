@@ -9,6 +9,9 @@ import {
   exchangeGithubCode,
   listRepos,
   clearRegisteredPublicRepos,
+  getGraph,
+  getRepoStats,
+  mapBackendGraphToFrontend,
 } from './client';
 
 describe('Public Repository Submission Flow', () => {
@@ -428,6 +431,120 @@ describe('Public Repository Submission Flow', () => {
       await expect(getFile('index.ts', 'unknown-bare-repo')).rejects.toThrow(
         /missing owner metadata/i
       );
+    });
+  });
+
+  describe('Neo4j Knowledge Graph Integration', () => {
+    it('mapBackendGraphToFrontend maps raw Neo4j response to frontend GraphData', () => {
+      const backendPayload = {
+        repo_id: 'pallets/flask',
+        nodes: [
+          {
+            id: 'pallets/flask:examples/app.py',
+            label: 'app.py',
+            kind: 'file',
+            file: 'examples/app.py',
+            language: 'Python',
+          },
+          {
+            id: 'pallets/flask:examples/app.py:function:create_app',
+            label: 'create_app',
+            kind: 'function',
+            file: 'examples/app.py',
+            start_line: 10,
+            end_line: 25,
+            signature: 'def create_app():',
+            docstring: 'Create application instance',
+          },
+        ],
+        edges: [
+          {
+            id: 'e1',
+            source: 'pallets/flask:examples/app.py',
+            target: 'pallets/flask:examples/app.py:function:create_app',
+            kind: 'DEFINES',
+            properties: { line: 10 },
+          },
+        ],
+        total_nodes: 2,
+        total_edges: 1,
+      };
+
+      const result = mapBackendGraphToFrontend(backendPayload, 'file');
+      expect(result.nodes).toHaveLength(2);
+      expect(result.nodes[0].id).toBe('pallets/flask:examples/app.py');
+      expect(result.nodes[0].kind).toBe('file');
+      expect(result.nodes[0].file).toBe('examples/app.py');
+
+      expect(result.nodes[1].label).toBe('create_app');
+      expect(result.nodes[1].kind).toBe('function');
+      expect(result.nodes[1].start_line).toBe(10);
+      expect(result.nodes[1].description).toBe('Create application instance');
+
+      expect(result.edges).toHaveLength(1);
+      expect(result.edges[0].source).toBe('pallets/flask:examples/app.py');
+      expect(result.edges[0].target).toBe('pallets/flask:examples/app.py:function:create_app');
+      expect(result.edges[0].line).toBe(10);
+      expect(result.edges[0].resolved).toBe(true);
+    });
+
+    it('mapBackendGraphToFrontend handles empty and sparse backend payloads', () => {
+      expect(mapBackendGraphToFrontend(null)).toEqual({ nodes: [], edges: [] });
+      expect(mapBackendGraphToFrontend({})).toEqual({ nodes: [], edges: [] });
+      expect(mapBackendGraphToFrontend({ nodes: [], edges: [] })).toEqual({ nodes: [], edges: [] });
+    });
+
+    it('getGraph forwards repository identifier encoded to /api/repos/{repo_id}/graph', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          repo_id: 'pallets/flask',
+          nodes: [
+            {
+              id: 'pallets/flask:src/main.py',
+              label: 'main.py',
+              kind: 'file',
+              file: 'src/main.py',
+            },
+          ],
+          edges: [],
+          total_nodes: 1,
+          total_edges: 0,
+        }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const graph = await getGraph('pallets/flask', 'file');
+
+      expect(fetchMock).toHaveBeenCalledWith('/api/repos/pallets%2Fflask/graph?limit=1000');
+      expect(graph.nodes).toHaveLength(1);
+      expect(graph.nodes[0].file).toBe('src/main.py');
+    });
+
+    it('getRepoStats calls /api/repos/{repo_id}/graph/stats and normalizes field names', async () => {
+      const fetchMock = vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          repo_id: 'pallets/flask',
+          files_count: 5,
+          total_symbols: 26,
+          relationships_count: 44,
+          unresolved_edges_count: 2,
+          languages: ['Python'],
+        }),
+      });
+      vi.stubGlobal('fetch', fetchMock);
+
+      const stats = await getRepoStats('pallets/flask');
+
+      expect(fetchMock).toHaveBeenCalledWith('/api/repos/pallets%2Fflask/graph/stats');
+      expect(stats.files_count).toBe(5);
+      expect(stats.symbols_count).toBe(26);
+      expect(stats.edges_count).toBe(44);
+      expect(stats.unresolved_edges_count).toBe(2);
+      expect(stats.languages).toEqual(['Python']);
     });
   });
 });
