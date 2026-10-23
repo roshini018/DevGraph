@@ -18,6 +18,10 @@ import type {
   SearchResult,
   ApiError,
   RepoStats,
+  GraphNode,
+  GraphEdge,
+  SymbolKind,
+  EdgeKind,
 } from '../types/api';
 import {
   MOCK_GITHUB_REPOS,
@@ -37,7 +41,102 @@ import {
 import { getMockControlsState } from './mockState';
 
 // Helper to determine mock mode
-const USE_MOCKS = import.meta.env.VITE_USE_MOCKS !== 'false';
+export const USE_MOCKS = import.meta.env.VITE_USE_MOCKS !== 'false';
+
+/**
+ * Maps raw backend Neo4j GraphElementsResponse into frontend GraphData.
+ */
+export function mapBackendGraphToFrontend(
+  data: unknown,
+  _mode: 'file' | 'symbol' = 'file'
+): GraphData {
+  if (!data || typeof data !== 'object') {
+    return { nodes: [], edges: [] };
+  }
+
+  const raw = data as { nodes?: unknown[]; edges?: unknown[] };
+  const rawNodes = Array.isArray(raw.nodes) ? raw.nodes : [];
+  const rawEdges = Array.isArray(raw.edges) ? raw.edges : [];
+
+  const nodes: GraphNode[] = rawNodes.map((item: unknown) => {
+    const n = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+    const rawKind = String(n.kind || '').toLowerCase();
+
+    let kind: SymbolKind = 'function';
+    if (rawKind === 'file') kind = 'file';
+    else if (rawKind === 'class') kind = 'class';
+    else if (rawKind === 'method') kind = 'method';
+    else if (rawKind === 'variable') kind = 'variable';
+    else if (rawKind === 'function') kind = 'function';
+    else if (rawKind === 'import') kind = 'function';
+    else kind = 'function';
+
+    const id = String(n.id || '');
+    let file = typeof n.file === 'string' ? n.file : '';
+    if (!file && id.includes(':')) {
+      const parts = id.split(':');
+      if (parts.length >= 2) {
+        file = parts[1];
+      }
+    }
+    if (!file && kind === 'file') {
+      file = String(n.label || id);
+    }
+
+    const label = String(n.label || (id.includes(':') ? id.split(':').pop() : id) || 'symbol');
+
+    return {
+      id,
+      label,
+      kind,
+      file,
+      start_line: typeof n.start_line === 'number' ? n.start_line : undefined,
+      end_line: typeof n.end_line === 'number' ? n.end_line : undefined,
+      description:
+        typeof n.docstring === 'string' && n.docstring
+          ? n.docstring
+          : typeof n.signature === 'string' && n.signature
+          ? n.signature
+          : typeof n.description === 'string'
+          ? n.description
+          : undefined,
+      metrics: {
+        in_degree: 0,
+        out_degree: 0,
+        symbol_count: 0,
+      },
+    };
+  });
+
+  const edges: GraphEdge[] = rawEdges.map((item: unknown, idx: number) => {
+    const e = (item && typeof item === 'object' ? item : {}) as Record<string, unknown>;
+    const rawKind = String(e.kind || '').toLowerCase();
+
+    let kind: EdgeKind = 'calls';
+    if (rawKind.includes('import')) kind = 'imports';
+    else if (rawKind.includes('inherit')) kind = 'inherits';
+    else if (rawKind.includes('call')) kind = 'calls';
+    else kind = 'calls';
+
+    const source = String(e.source || '');
+    const target = String(e.target || '');
+    const id = String(e.id || `e-${source}->${target}-${idx}`);
+    const props = (e.properties && typeof e.properties === 'object' ? e.properties : {}) as Record<string, unknown>;
+    const line = typeof props.line === 'number' ? props.line : typeof e.line === 'number' ? e.line : 0;
+    const resolved = typeof e.resolved === 'boolean' ? e.resolved : true;
+
+    return {
+      id,
+      source,
+      target,
+      kind,
+      line,
+      resolved,
+    };
+  });
+
+  return { nodes, edges };
+}
 
 // Helper to simulate realistic network latency
 async function simulateDelay(): Promise<void> {
@@ -697,24 +796,51 @@ export async function getFile(path: string, _repoId?: string): Promise<FileConte
  * Retrieve dependency graph (symbol-level or aggregated file-level).
  */
 export async function getGraph(
-  type: 'symbol' | 'file' = 'symbol',
-  _repoId?: string
+  repoIdOrMode?: string,
+  modeArg?: 'symbol' | 'file' | 'files' | 'symbols'
 ): Promise<GraphData> {
-  if (!USE_MOCKS) {
-    const res = await fetch(`/api/repos/${_repoId || 'default'}/graph?type=${type}`);
-    if (!res.ok) throw await res.json();
-    return res.json();
+  let targetRepoId: string | undefined;
+  let viewMode: 'symbol' | 'file' = 'file';
+
+  if (repoIdOrMode === 'file' || repoIdOrMode === 'symbol' || repoIdOrMode === 'files' || repoIdOrMode === 'symbols') {
+    viewMode = repoIdOrMode.startsWith('symbol') ? 'symbol' : 'file';
+    targetRepoId = undefined;
+  } else {
+    targetRepoId = repoIdOrMode;
+    if (modeArg) {
+      viewMode = modeArg.startsWith('symbol') ? 'symbol' : 'file';
+    }
   }
 
-  await simulateDelay();
-  checkSimulatedError();
+  const isDemo = !targetRepoId || targetRepoId === 'my-store' || targetRepoId === 'repo-1' || targetRepoId === 'default';
 
-  const { forceEmpty } = getMockControlsState();
-  if (forceEmpty) {
-    return { nodes: [], edges: [] };
+  if (isDemo && USE_MOCKS) {
+    await simulateDelay();
+    checkSimulatedError();
+
+    const { forceEmpty } = getMockControlsState();
+    if (forceEmpty) {
+      return { nodes: [], edges: [] };
+    }
+
+    return viewMode === 'file' ? mockGetFileGraph() : mockGetSymbolGraph();
   }
 
-  return type === 'file' ? mockGetFileGraph() : mockGetSymbolGraph();
+  const cleanId = targetRepoId || 'default';
+  const res = await fetch(`/api/repos/${encodeURIComponent(cleanId)}/graph?limit=1000`);
+  if (!res.ok) {
+    let msg = `Failed to fetch graph data (HTTP ${res.status})`;
+    try {
+      const err = await res.json();
+      if (err.detail) msg = err.detail;
+      else if (err.message) msg = err.message;
+    } catch {
+      // ignore
+    }
+    throw new Error(msg);
+  }
+  const data = await res.json();
+  return mapBackendGraphToFrontend(data, viewMode);
 }
 
 /**
@@ -847,16 +973,47 @@ export async function search(query: string, _repoId?: string): Promise<SearchRes
  * Retrieve high-level codebase statistics derived from indexed data.
  */
 export async function getRepoStats(_repoId?: string): Promise<RepoStats> {
-  if (!USE_MOCKS) {
-    const res = await fetch(`/api/repos/${_repoId || 'default'}/stats`);
-    if (!res.ok) throw await res.json();
-    return res.json();
+  const isDemo = !_repoId || _repoId === 'my-store' || _repoId === 'repo-1' || _repoId === 'default';
+
+  if (isDemo && USE_MOCKS) {
+    await simulateDelay();
+    checkSimulatedError();
+
+    const { forceEmpty } = getMockControlsState();
+    if (forceEmpty) {
+      return {
+        files_count: 0,
+        symbols_count: 0,
+        edges_count: 0,
+        unresolved_edges_count: 0,
+        languages: [],
+      };
+    }
+
+    return mockGetStats();
   }
 
-  await simulateDelay();
-  checkSimulatedError();
-
-  return mockGetStats();
+  const cleanId = _repoId || 'default';
+  const res = await fetch(`/api/repos/${encodeURIComponent(cleanId)}/graph/stats`);
+  if (!res.ok) {
+    let msg = `Failed to fetch repository graph statistics (HTTP ${res.status})`;
+    try {
+      const err = await res.json();
+      if (err.detail) msg = err.detail;
+      else if (err.message) msg = err.message;
+    } catch {
+      // ignore
+    }
+    throw new Error(msg);
+  }
+  const data = await res.json();
+  return {
+    files_count: data.files_count ?? 0,
+    symbols_count: data.total_symbols ?? data.symbols_count ?? 0,
+    edges_count: data.relationships_count ?? data.edges_count ?? 0,
+    unresolved_edges_count: data.unresolved_edges_count ?? 0,
+    languages: data.languages ?? ['Python'],
+  };
 }
 
 /**
