@@ -115,6 +115,7 @@ export function mapBackendGraphToFrontend(
     let kind: EdgeKind = 'calls';
     if (rawKind.includes('import')) kind = 'imports';
     else if (rawKind.includes('inherit')) kind = 'inherits';
+    else if (rawKind.includes('define')) kind = 'defines';
     else if (rawKind.includes('call')) kind = 'calls';
     else kind = 'calls';
 
@@ -847,27 +848,29 @@ export async function getGraph(
  * Get detailed metadata and connections for a specific node.
  */
 export async function getNodeDetail(nodeId: string, _repoId?: string): Promise<NodeDetail> {
-  if (!USE_MOCKS) {
-    const res = await fetch(`/api/repos/${_repoId || 'default'}/node/${nodeId}`);
-    if (!res.ok) throw await res.json();
-    return res.json();
+  const isDemo = !_repoId || _repoId === 'my-store' || _repoId === 'repo-1' || _repoId === 'default';
+
+  if (isDemo && USE_MOCKS) {
+    await simulateDelay();
+    checkSimulatedError();
+
+    const detail = mockGetNodeDetail(nodeId);
+    if (!detail) {
+      const err: ApiError = {
+        error: {
+          code: 'NODE_NOT_FOUND',
+          message: `Node with identifier "${nodeId}" was not found.`,
+        },
+      };
+      throw err;
+    }
+
+    return detail;
   }
 
-  await simulateDelay();
-  checkSimulatedError();
-
-  const detail = mockGetNodeDetail(nodeId);
-  if (!detail) {
-    const err: ApiError = {
-      error: {
-        code: 'NODE_NOT_FOUND',
-        message: `Node with identifier "${nodeId}" was not found.`,
-      },
-    };
-    throw err;
-  }
-
-  return detail;
+  const res = await fetch(`/api/repos/${encodeURIComponent(_repoId || 'default')}/node/${encodeURIComponent(nodeId)}`);
+  if (!res.ok) throw await res.json();
+  return res.json();
 }
 
 /**
@@ -878,18 +881,20 @@ export async function getConnection(
   targetId: string,
   _repoId?: string
 ): Promise<ConnectionResult> {
-  if (!USE_MOCKS) {
-    const res = await fetch(
-      `/api/repos/${_repoId || 'default'}/connection?source=${sourceId}&target=${targetId}`
-    );
-    if (!res.ok) throw await res.json();
-    return res.json();
+  const isDemo = !_repoId || _repoId === 'my-store' || _repoId === 'repo-1' || _repoId === 'default';
+
+  if (isDemo && USE_MOCKS) {
+    await simulateDelay();
+    checkSimulatedError();
+
+    return mockGetConnection(sourceId, targetId);
   }
 
-  await simulateDelay();
-  checkSimulatedError();
-
-  return mockGetConnection(sourceId, targetId);
+  const res = await fetch(
+    `/api/repos/${encodeURIComponent(_repoId || 'default')}/connection?source=${encodeURIComponent(sourceId)}&target=${encodeURIComponent(targetId)}`
+  );
+  if (!res.ok) throw await res.json();
+  return res.json();
 }
 
 /**
@@ -900,73 +905,79 @@ export async function getImpact(
   depth: number = 3,
   _repoId?: string
 ): Promise<ImpactResult> {
-  if (!USE_MOCKS) {
-    const res = await fetch(`/api/repos/${_repoId || 'default'}/impact`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ targets: targetIds, depth }),
-    });
-    if (!res.ok) throw await res.json();
-    return res.json();
+  const isDemo = !_repoId || _repoId === 'my-store' || _repoId === 'repo-1' || _repoId === 'default';
+
+  if (isDemo && USE_MOCKS) {
+    await simulateDelay();
+    checkSimulatedError();
+
+    const { forceEmpty } = getMockControlsState();
+    if (forceEmpty) {
+      return {
+        target_ids: targetIds,
+        impacted_nodes: [],
+        total_impacted: 0,
+        max_depth: depth,
+      };
+    }
+
+    return mockGetImpact(targetIds, depth);
   }
 
-  await simulateDelay();
-  checkSimulatedError();
-
-  const { forceEmpty } = getMockControlsState();
-  if (forceEmpty) {
-    return {
-      target_ids: targetIds,
-      impacted_nodes: [],
-      total_impacted: 0,
-      max_depth: depth,
-    };
-  }
-
-  return mockGetImpact(targetIds, depth);
+  const res = await fetch(`/api/repos/${encodeURIComponent(_repoId || 'default')}/impact`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ targets: targetIds, depth }),
+  });
+  if (!res.ok) throw await res.json();
+  return res.json();
 }
 
 /**
  * Ask AI question regarding codebase with citations.
  */
 export async function ask(question: string, _repoId?: string): Promise<AskResult> {
-  if (!USE_MOCKS) {
-    const res = await fetch(`/api/repos/${_repoId || 'default'}/ask`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question }),
-    });
-    if (!res.ok) throw await res.json();
-    return res.json();
+  const isDemo = !_repoId || _repoId === 'my-store' || _repoId === 'repo-1' || _repoId === 'default';
+
+  if (isDemo && USE_MOCKS) {
+    await simulateDelay();
+    checkSimulatedError();
+
+    return mockAsk(question);
   }
 
-  await simulateDelay();
-  checkSimulatedError();
-
-  return mockAsk(question);
+  const res = await fetch(`/api/repos/${encodeURIComponent(_repoId || 'default')}/ask`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ question }),
+  });
+  if (!res.ok) throw await res.json();
+  return res.json();
 }
 
 /**
  * Search across symbols, files, and code.
  */
 export async function search(query: string, _repoId?: string): Promise<SearchResult> {
-  if (!USE_MOCKS) {
-    const res = await fetch(
-      `/api/repos/${_repoId || 'default'}/search?q=${encodeURIComponent(query)}`
-    );
-    if (!res.ok) throw await res.json();
-    return res.json();
+  const isDemo = !_repoId || _repoId === 'my-store' || _repoId === 'repo-1' || _repoId === 'default';
+
+  if (isDemo && USE_MOCKS) {
+    await simulateDelay();
+    checkSimulatedError();
+
+    const { forceEmpty } = getMockControlsState();
+    if (forceEmpty) {
+      return { query, matches: [], total: 0 };
+    }
+
+    return mockSearch(query);
   }
 
-  await simulateDelay();
-  checkSimulatedError();
-
-  const { forceEmpty } = getMockControlsState();
-  if (forceEmpty) {
-    return { query, matches: [], total: 0 };
-  }
-
-  return mockSearch(query);
+  const res = await fetch(
+    `/api/repos/${encodeURIComponent(_repoId || 'default')}/search?q=${encodeURIComponent(query)}`
+  );
+  if (!res.ok) throw await res.json();
+  return res.json();
 }
 
 /**
@@ -1020,17 +1031,19 @@ export async function getRepoStats(_repoId?: string): Promise<RepoStats> {
  * Raw file list for direct inspections.
  */
 export async function listFiles(_repoId?: string): Promise<FileContent[]> {
-  if (!USE_MOCKS) {
-    const res = await fetch(`/api/repos/${_repoId || 'default'}/files`);
-    if (!res.ok) throw await res.json();
-    return res.json();
+  const isDemo = !_repoId || _repoId === 'my-store' || _repoId === 'repo-1' || _repoId === 'default';
+
+  if (isDemo && USE_MOCKS) {
+    await simulateDelay();
+    checkSimulatedError();
+
+    const { forceEmpty } = getMockControlsState();
+    if (forceEmpty) return [];
+
+    return MOCK_FILES;
   }
 
-  await simulateDelay();
-  checkSimulatedError();
-
-  const { forceEmpty } = getMockControlsState();
-  if (forceEmpty) return [];
-
-  return MOCK_FILES;
+  const res = await fetch(`/api/repos/${encodeURIComponent(_repoId || 'default')}/files`);
+  if (!res.ok) throw await res.json();
+  return res.json();
 }

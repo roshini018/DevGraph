@@ -25,6 +25,9 @@ class ParsedSymbol(BaseModel):
     parent: str | None = Field(
         None, description="Parent container, such as enclosing class name"
     )
+    inherits: list[str] = Field(
+        default_factory=list, description="Base class names or extended interfaces"
+    )
 
 
 class CodeChunk(BaseModel):

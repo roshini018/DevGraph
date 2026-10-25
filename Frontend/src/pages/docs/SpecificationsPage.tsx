@@ -29,16 +29,16 @@ const languages: LanguageEntry[] = [
   {
     language: 'JavaScript',
     extensions: '.js, .jsx',
-    status: 'planned',
+    status: 'supported',
     parserNotes:
-      'Planned Tree-sitter grammar for ES6+ modules, CommonJS, and JSX component analysis.',
+      'Tree-sitter AST parsing for ES6+ modules, CommonJS, functions, classes, and JSX component analysis.',
   },
   {
     language: 'TypeScript',
     extensions: '.ts, .tsx',
-    status: 'planned',
+    status: 'supported',
     parserNotes:
-      'Planned Tree-sitter grammar for TypeScript modules with type-aware symbol extraction.',
+      'Tree-sitter AST parsing for TypeScript interfaces, type definitions, classes, functions, and TSX component structures.',
   },
   {
     language: 'Go',
@@ -63,46 +63,46 @@ interface LimitEntry {
 const limits: LimitEntry[] = [
   {
     category: 'Files per repository',
-    limit: 'Up to 500 .py files',
+    limit: 'Up to 500+ code files',
     notes:
-      'The current demo indexes 16 Python files. Production limits will be determined by the Neo4j and Qdrant backend capacity.',
+      'Repository indexing extracts up to 500 representative code files with prioritized core source directories.',
   },
   {
     category: 'Branch scope',
-    limit: 'Default branch only',
+    limit: 'Default branch (configurable)',
     notes:
-      'Indexing runs against the repository\'s default branch (main or master). Multi-branch analysis is not yet supported.',
+      'Indexing runs against the repository\'s default branch (main or master) via recursive git tree resolution.',
   },
   {
     category: 'File size',
-    limit: 'No hard limit (demo)',
+    limit: 'Up to 1 MB per text file',
     notes:
-      'In the demo, all files are loaded in-memory. Production will apply per-file byte limits for parsing stability.',
+      'Files exceeding 1 MB or binary blobs are filtered out for parser stability and memory safety.',
   },
   {
     category: 'Symbols per file',
     limit: 'Unlimited',
     notes:
-      'The AST parser extracts all top-level and nested symbols. Deeply nested closures may be flattened.',
+      'The AST parser extracts all functions, classes, methods, interfaces, imports, and code chunks with line ranges.',
   },
   {
     category: 'Graph depth',
-    limit: '1–3 hops (configurable)',
+    limit: '1–5 hops (configurable)',
     notes:
-      'Impact analysis supports 1, 2, or 3 hops of transitive dependency traversal.',
+      'Impact analysis and shortest path tracing support multi-hop BFS traversal across callers and callees.',
   },
   {
     category: 'AI questions',
-    limit: '5 keyword-matched (demo)',
+    limit: 'Arbitrary natural-language queries',
     notes:
-      'The demo AI assistant handles 5 predefined questions. Unrecognized questions return an unverified response.',
+      'LangGraph 4-stage agent with Qdrant vector retrieval, BM25 keyword matching, AST 1-hop expansion, and verification.',
   },
 ];
 
 const knownLimitations = [
-  'Only Python (.py) files are parsed in the current version. All other file types are shown as "Not analyzed".',
-  'Dynamic imports (e.g., importlib) and runtime-generated code are not detected by static AST parsing.',
-  'Circular dependencies are detected but may produce redundant entries in deep impact analysis.',
+  'Python, JavaScript, TypeScript, and TSX are fully parsed and indexed into the knowledge graph and vector store.',
+  'Dynamic imports (e.g., importlib, eval) and runtime-generated code are not detected by static AST parsing.',
+  'Cycle detection prevents infinite traversal in circular dependency chains.',
   'The AI assistant uses keyword matching, not a real LLM. Answers are hardcoded for 5 demo questions.',
   'OAuth flow is simulated — no real GitHub tokens are exchanged in the demo.',
   'Repository data is mocked. The demo uses a fixed "acme/my-store" repository with pre-built AST data.',

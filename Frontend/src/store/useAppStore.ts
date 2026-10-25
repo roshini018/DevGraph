@@ -150,7 +150,15 @@ export const useAppStore = create<AppState>()(
           current.full_name !== repo.full_name &&
           current.id !== repo.id;
         if (isNewRepo) {
-          set({ selectedRepo: repo, openTabs: [], activeFile: null, highlightRange: null });
+          set({
+            selectedRepo: repo,
+            openTabs: [],
+            activeFile: null,
+            highlightRange: null,
+            impactTargets: [],
+            graphSelection: null,
+            multiSelection: [],
+          });
         } else {
           set({ selectedRepo: repo });
         }

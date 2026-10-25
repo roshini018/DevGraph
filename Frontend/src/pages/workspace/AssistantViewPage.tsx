@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   Sparkles,
   Plus,
@@ -82,8 +82,53 @@ export const AssistantViewPage: React.FC = () => {
     selectedRepo,
   } = useAppStore();
 
-  const repoId = selectedRepo?.repo_name || 'my-store';
-  const repoName = selectedRepo?.full_name || 'acme/my-store';
+  const { repoId: routeRepoId } = useParams<{ repoId: string }>();
+  const repoId = routeRepoId
+    ? decodeURIComponent(routeRepoId)
+    : selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'default';
+  const repoName = repoId !== 'default' ? repoId : (selectedRepo?.full_name || 'acme/my-store');
+  const isMockDemo = repoId === 'my-store' || repoId === 'repo-1' || repoId === 'default';
+
+  const suggestedPrompts = React.useMemo(() => {
+    if (isMockDemo) return FIVE_SUGGESTED_PROMPTS;
+    return [
+      {
+        id: 'p1',
+        title: `Explain the architecture of ${repoName}`,
+        query: `Explain the architecture and main entry point of ${repoName}`,
+        desc: 'Trace main components, application initialization, and key modules',
+        category: 'Architecture',
+      },
+      {
+        id: 'p2',
+        title: 'What are the main cross-file dependencies?',
+        query: `What are the main dependencies and import chains across ${repoName}?`,
+        desc: 'Inspect incoming and outgoing imports from the Knowledge Graph',
+        category: 'Dependencies',
+      },
+      {
+        id: 'p3',
+        title: 'Trace request routing and execution flow',
+        query: `How does request routing or main execution flow work in ${repoName}?`,
+        desc: 'Follow the core call graph path from dispatch to handler',
+        category: 'Flow Trace',
+      },
+      {
+        id: 'p4',
+        title: 'What are the key classes and symbols?',
+        query: `List and explain the key classes and core functions defined in ${repoName}`,
+        desc: 'Catalog extracted AST symbols and their responsibilities',
+        category: 'Symbols',
+      },
+      {
+        id: 'p5',
+        title: 'What might break if core functions are modified?',
+        query: `What is the blast radius and impact if core functions in ${repoName} are refactored?`,
+        desc: 'Run multi-hop impact analysis across callers and dependent tests',
+        category: 'Blast Radius',
+      },
+    ];
+  }, [isMockDemo, repoName]);
 
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -244,7 +289,7 @@ export const AssistantViewPage: React.FC = () => {
                   </div>
 
                   <div className="grid grid-cols-1 gap-2.5">
-                    {FIVE_SUGGESTED_PROMPTS.map(p => (
+                    {suggestedPrompts.map(p => (
                       <div
                         key={p.id}
                         onClick={() => handleAsk(p.query)}
@@ -483,7 +528,7 @@ export const AssistantViewPage: React.FC = () => {
           <Button
             variant="secondary"
             size="sm"
-            onClick={() => navigate(`/w/${repoId}`)}
+            onClick={() => navigate(`/w/${encodeURIComponent(repoId)}`)}
             className="w-full text-xs"
           >
             Back to Code Workspace

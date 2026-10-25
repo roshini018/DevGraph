@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   Sparkles,
   PanelRightClose,
@@ -45,7 +45,10 @@ export const RightAIPanel: React.FC = () => {
     selectedRepo,
   } = useAppStore();
 
-  const repoId = selectedRepo?.repo_name || 'my-store';
+  const { repoId: routeRepoId } = useParams<{ repoId: string }>();
+  const repoId = routeRepoId
+    ? decodeURIComponent(routeRepoId)
+    : selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'default';
 
   const [input, setInput] = useState('');
   const [loading, setLoading] = useState(false);
@@ -149,7 +152,7 @@ export const RightAIPanel: React.FC = () => {
           <Tooltip content="Open full assistant screen" side="bottom">
             <button
               type="button"
-              onClick={() => navigate(`/w/${repoId}/assistant`)}
+              onClick={() => navigate(`/w/${encodeURIComponent(repoId)}/assistant`)}
               className="text-subtle hover:text-text p-1 rounded transition-colors"
               aria-label="Open in full assistant"
             >
@@ -406,7 +409,7 @@ export const RightAIPanel: React.FC = () => {
         <div className="pt-2 text-center">
           <button
             type="button"
-            onClick={() => navigate(`/w/${repoId}/assistant`)}
+            onClick={() => navigate(`/w/${encodeURIComponent(repoId)}/assistant`)}
             className="text-[11px] font-mono text-subtle hover:text-text underline cursor-pointer transition-colors"
           >
             Open in full assistant &rarr;

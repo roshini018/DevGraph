@@ -1,5 +1,6 @@
 import React from 'react';
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { ErrorBoundary } from './components/ErrorBoundary';
 import { LandingPage } from './pages/LandingPage';
 import { ConnectPage } from './pages/ConnectPage';
 import { ReposPage } from './pages/ReposPage';
@@ -18,8 +19,9 @@ import { SpecificationsPage } from './pages/docs/SpecificationsPage';
 
 export const App: React.FC = () => {
   return (
-    <BrowserRouter>
-      <Routes>
+    <ErrorBoundary>
+      <BrowserRouter>
+        <Routes>
         {/* Public Routes */}
         <Route path="/" element={<LandingPage />} />
         <Route path="/connect" element={<ConnectPage />} />
@@ -64,8 +66,8 @@ export const App: React.FC = () => {
         {/* Fallback */}
         <Route path="*" element={<Navigate to="/" replace />} />
       </Routes>
-
     </BrowserRouter>
+  </ErrorBoundary>
   );
 };
 

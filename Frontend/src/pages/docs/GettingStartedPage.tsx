@@ -23,11 +23,11 @@ export const GettingStartedPage: React.FC = () => {
       title: 'Connect your GitHub account',
       icon: <GitFork className="w-5 h-5 text-green-bright" />,
       description:
-        'Click "Connect GitHub" on the landing page. DevGraph redirects you to the GitHub authorization screen where you grant read-only access to your repositories.',
+        'Click "Connect GitHub" or enter any public GitHub URL on the connect page. DevGraph supports both authenticated OAuth connections and instant public repository exploration.',
       details: [
         'DevGraph requests only read-only metadata permissions — no write access is ever granted.',
-        'Your OAuth token is used exclusively for listing repositories and reading file contents.',
-        'No source code is stored on third-party servers; all analysis runs in-memory.',
+        'Enter any public repository (e.g. pallets/flask) to analyze instantly without OAuth.',
+        'Knowledge graph and vector index are constructed securely scoped by repository ID.',
       ],
     },
     {
@@ -35,22 +35,22 @@ export const GettingStartedPage: React.FC = () => {
       title: 'Select a repository',
       icon: <Search className="w-5 h-5 text-green-bright" />,
       description:
-        'After authorization, you see your repository list. Pick the repository you want to analyze. Currently, DevGraph supports Python repositories on the default branch.',
+        'After authorization or URL entry, you see your repository list. Pick the repository you want to analyze. DevGraph supports Python, TypeScript, and JavaScript codebases.',
       details: [
-        'Use the search bar to filter by repository name.',
+        'Use the search bar to filter by repository name or enter a direct GitHub link.',
         'Public and private repositories are both supported with proper authorization.',
         'The default branch (usually main or master) is indexed automatically.',
       ],
     },
     {
       number: '03',
-      title: 'Indexing & AST parsing',
+      title: 'Indexing & Knowledge Graph Ingestion',
       icon: <Cpu className="w-5 h-5 text-green-bright" />,
       description:
-        'DevGraph fetches your repository files and runs AST parsing to extract symbols (functions, classes, methods), resolve imports, and build a dependency graph.',
+        'DevGraph fetches your repository files, executes Tree-sitter AST parsing, extracts call hierarchies, and indexes symbols into Neo4j Aura Cloud and Qdrant vector storage.',
       details: [
-        'The indexing pipeline extracts functions, classes, and their relationships.',
-        'Import paths are resolved to connect cross-file dependencies.',
+        'The indexing pipeline extracts functions, classes, methods, and exact CALLS/IMPORTS relationships.',
+        'Dense code chunk embeddings are indexed in Qdrant with BM25 keyword index caching.',
         'A real-time progress bar shows the indexing status for each file.',
       ],
     },
@@ -64,14 +64,15 @@ export const GettingStartedPage: React.FC = () => {
         'The code view provides an IDE-like experience with syntax highlighting and symbol navigation.',
         'The graph view visualizes file and function dependencies with interactive swimlane layouts.',
         'Impact analysis shows what would break if you changed a specific function or file.',
+        'The agentic AI assistant answers questions with verified AST call-graph citations.',
       ],
     },
   ];
 
   const prerequisites = [
-    'A GitHub account with at least one Python repository',
+    'A GitHub account or any public GitHub repository URL (e.g. pallets/flask)',
     'A modern browser (Chrome, Firefox, Safari, or Edge)',
-    'Repository must contain .py files on the default branch',
+    'Repository contains Python, JavaScript, or TypeScript source files',
   ];
 
   const commonErrors = [

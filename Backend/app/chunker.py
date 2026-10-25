@@ -86,116 +86,106 @@ def extract_symbols(
 
 
 def _extract_python_symbols(root: Node, source_bytes: bytes) -> list[ParsedSymbol]:
-    """Extract Python functions, classes, methods, and imports."""
+    """Extract Python functions, classes, methods, and imports, including nested blocks and inheritance."""
     symbols: list[ParsedSymbol] = []
 
-    for child in root.children:
-        actual_node = child
-        # Unwrap decorated definition if present
-        if child.type == "decorated_definition":
-            for c in child.children:
+    def walk(node: Node, enclosing_class: str | None = None) -> None:
+        actual_node = node
+        if node.type == "decorated_definition":
+            for c in node.children:
                 if c.type in ("function_definition", "class_definition"):
                     actual_node = c
                     break
 
-        # Functions
-        if actual_node.type == "function_definition":
+        if actual_node.type == "class_definition":
             name_node = actual_node.child_by_field_name("name")
-            name = _node_text(name_node, source_bytes) if name_node else "anonymous"
+            class_name = _node_text(name_node, source_bytes) if name_node else "anonymous"
             body = actual_node.child_by_field_name("body")
             docstring = _extract_python_docstring(body, source_bytes)
-            # Signature: take first line of definition
             first_line = _node_text(actual_node, source_bytes).splitlines()[0].strip()
-            symbols.append(
-                ParsedSymbol(
-                    name=name,
-                    kind="function",
-                    start_line=child.start_point.row + 1,
-                    end_line=child.end_point.row + 1,
-                    start_col=child.start_point.column,
-                    end_col=child.end_point.column,
-                    signature=first_line,
-                    docstring=docstring,
-                    parent=None,
-                )
-            )
 
-        # Classes
-        elif actual_node.type == "class_definition":
-            class_name_node = actual_node.child_by_field_name("name")
-            class_name = (
-                _node_text(class_name_node, source_bytes)
-                if class_name_node
-                else "anonymous"
-            )
-            body = actual_node.child_by_field_name("body")
-            docstring = _extract_python_docstring(body, source_bytes)
-            first_line = _node_text(actual_node, source_bytes).splitlines()[0].strip()
+            base_classes: list[str] = []
+            superclasses_node = actual_node.child_by_field_name("superclasses")
+            if superclasses_node:
+                for sc in superclasses_node.children:
+                    if sc.type not in ("(", ")", ",", "comment"):
+                        txt = _node_text(sc, source_bytes).strip()
+                        if txt:
+                            base_classes.append(txt)
+
             symbols.append(
                 ParsedSymbol(
                     name=class_name,
                     kind="class",
-                    start_line=child.start_point.row + 1,
-                    end_line=child.end_point.row + 1,
-                    start_col=child.start_point.column,
-                    end_col=child.end_point.column,
+                    start_line=node.start_point.row + 1,
+                    end_line=node.end_point.row + 1,
+                    start_col=node.start_point.column,
+                    end_col=node.end_point.column,
                     signature=first_line,
                     docstring=docstring,
-                    parent=None,
+                    parent=enclosing_class,
+                    inherits=base_classes,
                 )
             )
 
-            # Methods inside class body
             if body:
                 for b_child in body.children:
-                    m_node = b_child
-                    if b_child.type == "decorated_definition":
-                        for c in b_child.children:
-                            if c.type == "function_definition":
-                                m_node = c
-                                break
-                    if m_node.type == "function_definition":
-                        m_name_node = m_node.child_by_field_name("name")
-                        m_name = (
-                            _node_text(m_name_node, source_bytes)
-                            if m_name_node
-                            else "anonymous"
-                        )
-                        m_body = m_node.child_by_field_name("body")
-                        m_docstring = _extract_python_docstring(m_body, source_bytes)
-                        m_sig = (
-                            _node_text(m_node, source_bytes).splitlines()[0].strip()
-                        )
-                        symbols.append(
-                            ParsedSymbol(
-                                name=m_name,
-                                kind="method",
-                                start_line=b_child.start_point.row + 1,
-                                end_line=b_child.end_point.row + 1,
-                                start_col=b_child.start_point.column,
-                                end_col=b_child.end_point.column,
-                                signature=m_sig,
-                                docstring=m_docstring,
-                                parent=class_name,
-                            )
-                        )
+                    walk(b_child, enclosing_class=class_name)
+            return
 
-        # Imports
-        elif child.type in ("import_statement", "import_from_statement"):
-            raw_import = _node_text(child, source_bytes).strip()
+        elif actual_node.type == "function_definition":
+            name_node = actual_node.child_by_field_name("name")
+            name = _node_text(name_node, source_bytes) if name_node else "anonymous"
+            body = actual_node.child_by_field_name("body")
+            docstring = _extract_python_docstring(body, source_bytes)
+            first_line = _node_text(actual_node, source_bytes).splitlines()[0].strip()
+
+            kind = "method" if enclosing_class else "function"
+            symbols.append(
+                ParsedSymbol(
+                    name=name,
+                    kind=kind,
+                    start_line=node.start_point.row + 1,
+                    end_line=node.end_point.row + 1,
+                    start_col=node.start_point.column,
+                    end_col=node.end_point.column,
+                    signature=first_line,
+                    docstring=docstring,
+                    parent=enclosing_class,
+                    inherits=[],
+                )
+            )
+
+            # Traverse function body for nested functions or statements
+            if body:
+                for f_child in body.children:
+                    walk(f_child, enclosing_class=None)
+            return
+
+        elif actual_node.type in ("import_statement", "import_from_statement"):
+            raw_import = _node_text(actual_node, source_bytes).strip()
             symbols.append(
                 ParsedSymbol(
                     name=raw_import.splitlines()[0],
                     kind="import",
-                    start_line=child.start_point.row + 1,
-                    end_line=child.end_point.row + 1,
-                    start_col=child.start_point.column,
-                    end_col=child.end_point.column,
+                    start_line=node.start_point.row + 1,
+                    end_line=node.end_point.row + 1,
+                    start_col=node.start_point.column,
+                    end_col=node.end_point.column,
                     signature=raw_import,
                     docstring=None,
-                    parent=None,
+                    parent=enclosing_class,
+                    inherits=[],
                 )
             )
+            return
+
+        # Traverse nested blocks (if, try, with, for, while, etc.)
+        for child in actual_node.children:
+            walk(child, enclosing_class=enclosing_class)
+
+    for child in root.children:
+        walk(child, None)
 
     return symbols
 
@@ -205,56 +195,88 @@ def _extract_js_ts_symbols(
     source_bytes: bytes,
     canonical_lang: str,
 ) -> list[ParsedSymbol]:
-    """Extract JS/TS functions, classes, interfaces, methods, and imports."""
+    """Extract JS/TS functions, classes, interfaces, methods, and imports with inheritance and nested support."""
     symbols: list[ParsedSymbol] = []
 
-    for child in root.children:
-        target = child
+    def walk(node: Node, enclosing_class: str | None = None) -> None:
+        target = node
+
         # Unwrap export statements
-        if child.type == "export_statement":
-            decl = child.child_by_field_name("declaration")
+        if node.type == "export_statement":
+            decl = node.child_by_field_name("declaration")
             if decl:
                 target = decl
+            else:
+                for c in node.children:
+                    if c.type in (
+                        "function_declaration",
+                        "generator_function_declaration",
+                        "class_declaration",
+                        "interface_declaration",
+                        "type_alias_declaration",
+                        "enum_declaration",
+                    ):
+                        target = c
+                        break
 
         # Functions
         if target.type in ("function_declaration", "generator_function_declaration"):
             name_node = target.child_by_field_name("name")
             name = _node_text(name_node, source_bytes) if name_node else "anonymous"
             sig = _node_text(target, source_bytes).splitlines()[0].strip()
+            kind = "method" if enclosing_class else "function"
             symbols.append(
                 ParsedSymbol(
                     name=name,
-                    kind="function",
-                    start_line=child.start_point.row + 1,
-                    end_line=child.end_point.row + 1,
-                    start_col=child.start_point.column,
-                    end_col=child.end_point.column,
+                    kind=kind,
+                    start_line=node.start_point.row + 1,
+                    end_line=node.end_point.row + 1,
+                    start_col=node.start_point.column,
+                    end_col=node.end_point.column,
                     signature=sig,
                     docstring=None,
-                    parent=None,
+                    parent=enclosing_class,
+                    inherits=[],
                 )
             )
+            body = target.child_by_field_name("body")
+            if body:
+                for b_child in body.children:
+                    walk(b_child, enclosing_class=None)
+            return
 
         # Classes
         elif target.type == "class_declaration":
             name_node = target.child_by_field_name("name")
             name = _node_text(name_node, source_bytes) if name_node else "anonymous"
             sig = _node_text(target, source_bytes).splitlines()[0].strip()
+
+            base_classes: list[str] = []
+            for ch in target.children:
+                if ch.type == "class_heritage":
+                    for hc in ch.children:
+                        if hc.type in ("extends_clause", "implements_clause"):
+                            for hcc in hc.children:
+                                if hcc.type not in ("extends", "implements", ",", "comment"):
+                                    txt = _node_text(hcc, source_bytes).strip()
+                                    if txt:
+                                        base_classes.append(txt)
+
             symbols.append(
                 ParsedSymbol(
                     name=name,
                     kind="class",
-                    start_line=child.start_point.row + 1,
-                    end_line=child.end_point.row + 1,
-                    start_col=child.start_point.column,
-                    end_col=child.end_point.column,
+                    start_line=node.start_point.row + 1,
+                    end_line=node.end_point.row + 1,
+                    start_col=node.start_point.column,
+                    end_col=node.end_point.column,
                     signature=sig,
                     docstring=None,
-                    parent=None,
+                    parent=enclosing_class,
+                    inherits=base_classes,
                 )
             )
 
-            # Methods inside class_body
             body = target.child_by_field_name("body")
             if body:
                 for b_child in body.children:
@@ -279,11 +301,77 @@ def _extract_js_ts_symbols(
                                 signature=m_sig,
                                 docstring=None,
                                 parent=name,
+                                inherits=[],
                             )
                         )
+                    elif b_child.type in ("public_field_definition", "field_definition"):
+                        # Arrow function class properties: prop = () => ...
+                        prop_name_node = b_child.child_by_field_name("property") or b_child.child_by_field_name("name")
+                        if not prop_name_node:
+                            for c in b_child.children:
+                                if c.type in ("property_identifier", "identifier"):
+                                    prop_name_node = c
+                                    break
+                        val_node = b_child.child_by_field_name("value")
+                        if not val_node:
+                            for c in b_child.children:
+                                if c.type in ("arrow_function", "function_expression"):
+                                    val_node = c
+                                    break
+                        if prop_name_node and val_node and val_node.type in ("arrow_function", "function_expression"):
+                            prop_name = _node_text(prop_name_node, source_bytes)
+                            p_sig = _node_text(b_child, source_bytes).splitlines()[0].strip()
+                            symbols.append(
+                                ParsedSymbol(
+                                    name=prop_name,
+                                    kind="method",
+                                    start_line=b_child.start_point.row + 1,
+                                    end_line=b_child.end_point.row + 1,
+                                    start_col=b_child.start_point.column,
+                                    end_col=b_child.end_point.column,
+                                    signature=p_sig,
+                                    docstring=None,
+                                    parent=name,
+                                    inherits=[],
+                                )
+                            )
+                    else:
+                        walk(b_child, enclosing_class=name)
+            return
 
         # TypeScript Interfaces
         elif target.type == "interface_declaration":
+            name_node = target.child_by_field_name("name")
+            name = _node_text(name_node, source_bytes) if name_node else "anonymous"
+            sig = _node_text(target, source_bytes).splitlines()[0].strip()
+
+            base_ifaces: list[str] = []
+            for ch in target.children:
+                if ch.type == "extends_clause":
+                    for hcc in ch.children:
+                        if hcc.type not in ("extends", ",", "comment"):
+                            txt = _node_text(hcc, source_bytes).strip()
+                            if txt:
+                                base_ifaces.append(txt)
+
+            symbols.append(
+                ParsedSymbol(
+                    name=name,
+                    kind="interface",
+                    start_line=node.start_point.row + 1,
+                    end_line=node.end_point.row + 1,
+                    start_col=node.start_point.column,
+                    end_col=node.end_point.column,
+                    signature=sig,
+                    docstring=None,
+                    parent=enclosing_class,
+                    inherits=base_ifaces,
+                )
+            )
+            return
+
+        # TypeScript Type Aliases
+        elif target.type == "type_alias_declaration":
             name_node = target.child_by_field_name("name")
             name = _node_text(name_node, source_bytes) if name_node else "anonymous"
             sig = _node_text(target, source_bytes).splitlines()[0].strip()
@@ -291,15 +379,38 @@ def _extract_js_ts_symbols(
                 ParsedSymbol(
                     name=name,
                     kind="interface",
-                    start_line=child.start_point.row + 1,
-                    end_line=child.end_point.row + 1,
-                    start_col=child.start_point.column,
-                    end_col=child.end_point.column,
+                    start_line=node.start_point.row + 1,
+                    end_line=node.end_point.row + 1,
+                    start_col=node.start_point.column,
+                    end_col=node.end_point.column,
                     signature=sig,
                     docstring=None,
-                    parent=None,
+                    parent=enclosing_class,
+                    inherits=[],
                 )
             )
+            return
+
+        # TypeScript Enums
+        elif target.type == "enum_declaration":
+            name_node = target.child_by_field_name("name")
+            name = _node_text(name_node, source_bytes) if name_node else "anonymous"
+            sig = _node_text(target, source_bytes).splitlines()[0].strip()
+            symbols.append(
+                ParsedSymbol(
+                    name=name,
+                    kind="class",
+                    start_line=node.start_point.row + 1,
+                    end_line=node.end_point.row + 1,
+                    start_col=node.start_point.column,
+                    end_col=node.end_point.column,
+                    signature=sig,
+                    docstring=None,
+                    parent=enclosing_class,
+                    inherits=[],
+                )
+            )
+            return
 
         # Lexical variable declarations with arrow functions, functions, or require imports
         elif target.type in ("lexical_declaration", "variable_declaration"):
@@ -309,13 +420,14 @@ def _extract_js_ts_symbols(
                     ParsedSymbol(
                         name=raw_text.splitlines()[0],
                         kind="import",
-                        start_line=child.start_point.row + 1,
-                        end_line=child.end_point.row + 1,
-                        start_col=child.start_point.column,
-                        end_col=child.end_point.column,
+                        start_line=node.start_point.row + 1,
+                        end_line=node.end_point.row + 1,
+                        start_col=node.start_point.column,
+                        end_col=node.end_point.column,
                         signature=raw_text,
                         docstring=None,
-                        parent=None,
+                        parent=enclosing_class,
+                        inherits=[],
                     )
                 )
 
@@ -329,22 +441,22 @@ def _extract_js_ts_symbols(
                         and name_node
                     ):
                         name = _node_text(name_node, source_bytes)
-                        sig = (
-                            _node_text(child, source_bytes).splitlines()[0].strip()
-                        )
+                        sig = _node_text(node, source_bytes).splitlines()[0].strip()
                         symbols.append(
                             ParsedSymbol(
                                 name=name,
                                 kind="function",
-                                start_line=child.start_point.row + 1,
-                                end_line=child.end_point.row + 1,
-                                start_col=child.start_point.column,
-                                end_col=child.end_point.column,
+                                start_line=node.start_point.row + 1,
+                                end_line=node.end_point.row + 1,
+                                start_col=node.start_point.column,
+                                end_col=node.end_point.column,
                                 signature=sig,
                                 docstring=None,
-                                parent=None,
+                                parent=enclosing_class,
+                                inherits=[],
                             )
                         )
+            return
 
         # Standalone expression statement with require
         elif target.type == "expression_statement":
@@ -354,32 +466,43 @@ def _extract_js_ts_symbols(
                     ParsedSymbol(
                         name=raw_text.splitlines()[0],
                         kind="import",
-                        start_line=child.start_point.row + 1,
-                        end_line=child.end_point.row + 1,
-                        start_col=child.start_point.column,
-                        end_col=child.end_point.column,
+                        start_line=node.start_point.row + 1,
+                        end_line=node.end_point.row + 1,
+                        start_col=node.start_point.column,
+                        end_col=node.end_point.column,
                         signature=raw_text,
                         docstring=None,
-                        parent=None,
+                        parent=enclosing_class,
+                        inherits=[],
                     )
                 )
+            return
 
         # Imports
-        elif child.type == "import_statement":
-            raw_import = _node_text(child, source_bytes).strip()
+        elif target.type == "import_statement":
+            raw_import = _node_text(target, source_bytes).strip()
             symbols.append(
                 ParsedSymbol(
                     name=raw_import.splitlines()[0],
                     kind="import",
-                    start_line=child.start_point.row + 1,
-                    end_line=child.end_point.row + 1,
-                    start_col=child.start_point.column,
-                    end_col=child.end_point.column,
+                    start_line=node.start_point.row + 1,
+                    end_line=node.end_point.row + 1,
+                    start_col=node.start_point.column,
+                    end_col=node.end_point.column,
                     signature=raw_import,
                     docstring=None,
-                    parent=None,
+                    parent=enclosing_class,
+                    inherits=[],
                 )
             )
+            return
+
+        # Recurse into blocks/children
+        for child in target.children:
+            walk(child, enclosing_class=enclosing_class)
+
+    for child in root.children:
+        walk(child, None)
 
     return symbols
 

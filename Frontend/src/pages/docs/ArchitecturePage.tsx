@@ -30,11 +30,11 @@ const pipelineStages: {
     icon: <GitFork className="w-5 h-5" />,
     status: 'implemented',
     description:
-      'DevGraph authenticates via GitHub OAuth and fetches repository metadata and file contents from the default branch.',
+      'DevGraph authenticates via GitHub OAuth and public API to fetch repository metadata, recursive git trees, and file contents from the default branch.',
     details: [
-      'Read-only OAuth tokens — no write permissions granted.',
-      'Fetches all files on the default branch (main / master).',
-      'Filters for supported file types (.py) before processing.',
+      'Read-only OAuth tokens & public repository analysis without credentials.',
+      'Fetches all files on the default branch (main / master) via recursive trees.',
+      'Filters for supported multi-language file types (.py, .js, .ts, .tsx) before processing.',
     ],
   },
   {
@@ -43,12 +43,12 @@ const pipelineStages: {
     icon: <FileCode className="w-5 h-5" />,
     status: 'implemented',
     description:
-      'Each Python file is parsed into an Abstract Syntax Tree. The parser extracts functions, classes, methods, decorators, and module-level symbols with accurate line ranges.',
+      'Each code file is parsed into an Abstract Syntax Tree using Tree-sitter. The parser extracts functions, classes, methods, decorators, and module-level symbols with accurate line ranges.',
     details: [
-      'Tree-sitter / Python AST parser produces deterministic, reproducible results.',
+      'Tree-sitter multi-language parser produces deterministic, reproducible results.',
       'Each symbol records its start and end line numbers for precise code mapping.',
       'Import statements are resolved to connect cross-file dependencies.',
-      'Decorator metadata is preserved for framework-aware analysis.',
+      'Decorator and docstring metadata is preserved for framework-aware analysis.',
     ],
   },
   {
@@ -57,10 +57,10 @@ const pipelineStages: {
     icon: <Network className="w-5 h-5" />,
     status: 'implemented',
     description:
-      'Extracted symbols and their relationships are assembled into a directed dependency graph. Each node is a symbol; each edge represents a call, import, or inheritance relationship.',
+      'Extracted symbols and their relationships are assembled into a directed dependency graph. Each node is a symbol or file; each edge represents a CALLS, IMPORTS, DEFINES, or INHERITS relationship.',
     details: [
-      'Nodes: files, functions, classes, methods — each with a unique ID.',
-      'Edges: calls, imports, inheritance, decorator usage.',
+      'Nodes: files, functions, classes, methods, interfaces, and imports — each with a unique ID.',
+      'Edges: exact calls, file imports, class inheritance, and structural definition.',
       'Bidirectional traversal supports both "who calls this?" and "what does this call?".',
       'Cycle detection prevents infinite traversal in circular dependency chains.',
     ],
@@ -69,53 +69,53 @@ const pipelineStages: {
     id: 'storage',
     label: 'Neo4j Graph Storage',
     icon: <Database className="w-5 h-5" />,
-    status: 'planned',
+    status: 'implemented',
     description:
-      'The constructed graph will be persisted in Neo4j for efficient traversal queries, impact analysis, and relationship-based search across large codebases.',
+      'The constructed graph is persisted in Neo4j Aura Cloud for efficient Cypher traversal queries, blast-radius impact analysis, and relationship-based shortest-path queries.',
     details: [
-      'Cypher queries for multi-hop impact traversal.',
-      'Property graph model preserves symbol metadata (line ranges, types, docstrings).',
-      'Planned for production — current demo uses an in-memory graph.',
+      'Declarative Cypher queries for multi-hop BFS impact traversal and shortest path search.',
+      'Uniqueness constraints and lookup indexes on repo_id ensure MERGE idempotency.',
+      'Property graph model preserves symbol signatures, line ranges, docstrings, and metrics.',
     ],
   },
   {
     id: 'vector',
     label: 'Qdrant Vector Index',
     icon: <Search className="w-5 h-5" />,
-    status: 'planned',
+    status: 'implemented',
     description:
-      'Code chunks and docstrings will be embedded into vectors and stored in Qdrant for semantic similarity search, enabling natural-language queries over the codebase.',
+      'Code chunks are embedded into dense vectors and indexed in Qdrant Cloud for semantic similarity search, enabling natural-language queries over the codebase.',
     details: [
-      'Code chunking with overlap for context preservation.',
-      'Embedding model maps code semantics to high-dimensional vectors.',
-      'Hybrid retrieval combines vector similarity with BM25 keyword matching.',
+      'Contextual code chunking preserving class and function scope boundaries.',
+      'Dense embeddings map code semantics into high-dimensional vector space.',
+      'Reciprocal Rank Fusion (RRF) combines vector similarity with BM25 keyword matching.',
     ],
   },
   {
     id: 'bm25',
     label: 'BM25 Keyword Search',
     icon: <Search className="w-5 h-5" />,
-    status: 'planned',
+    status: 'implemented',
     description:
-      'A BM25 index over symbol names, docstrings, and code tokens provides fast keyword-based retrieval that complements semantic vector search.',
+      'A code-aware BM25 index with camelCase and snake_case tokenization provides fast keyword retrieval that complements semantic vector search.',
     details: [
-      'Term-frequency scoring tuned for code identifiers.',
-      'Combines with vector search for hybrid retrieval ranking.',
-      'Planned integration alongside Qdrant for production use.',
+      'Sub-token identifier splitting tuned specifically for programming languages.',
+      'Per-repository in-memory index with persistent disk caching in app/data.',
+      'Fused with Qdrant vector retrieval using k=60 Reciprocal Rank Fusion.',
     ],
   },
   {
     id: 'llm',
-    label: 'LLM Answer Generation',
+    label: 'Agentic Answer Generation',
     icon: <MessageSquare className="w-5 h-5" />,
-    status: 'planned',
+    status: 'implemented',
     description:
-      'Retrieved code context is fed to a large language model that generates grounded answers with inline citations. Each citation links back to the specific file and line range.',
+      'Retrieved code context is fed into a 4-stage LangGraph-style agent (Plan → Retrieve → Generate → Verify) that produces grounded answers with verified AST citations.',
     details: [
-      'Context window populated with relevant code chunks from hybrid retrieval.',
-      'Citations reference exact file paths and line numbers.',
-      'Verification step cross-checks LLM claims against the graph for factual accuracy.',
-      'Current demo uses keyword-matched mock answers with hardcoded citations.',
+      'Context window populated with relevant code chunks from hybrid RAG retrieval.',
+      'Graph-expanded 1-hop AST neighborhood context adds caller and callee insights.',
+      'Verification step validates citations against the real AST call hierarchy.',
+      'Works with live LLM keys or deterministic grounded AST chunk assembly fallback.',
     ],
   },
 ];
@@ -274,12 +274,12 @@ export const ArchitecturePage: React.FC = () => {
               </thead>
               <tbody className="divide-y divide-line">
                 <tr>
-                  <td className="px-5 py-3 text-text">GitHub OAuth & Fetch</td>
+                  <td className="px-5 py-3 text-text">GitHub OAuth & Public Ingestion</td>
                   <td className="px-5 py-3">
                     <Badge variant="green">Live</Badge>
                   </td>
                   <td className="px-5 py-3 text-subtle text-xs hidden sm:table-cell">
-                    Mock OAuth flow with simulated API
+                    Real GitHub OAuth 2.0 flow + public repo instant analysis without credentials
                   </td>
                 </tr>
                 <tr>
@@ -288,7 +288,7 @@ export const ArchitecturePage: React.FC = () => {
                     <Badge variant="green">Live</Badge>
                   </td>
                   <td className="px-5 py-3 text-subtle text-xs hidden sm:table-cell">
-                    16 Python files with accurate line ranges
+                    Multi-language Tree-sitter (Python, JS, TS, TSX) with accurate line ranges
                   </td>
                 </tr>
                 <tr>
@@ -297,61 +297,61 @@ export const ArchitecturePage: React.FC = () => {
                     <Badge variant="green">Live</Badge>
                   </td>
                   <td className="px-5 py-3 text-subtle text-xs hidden sm:table-cell">
-                    React Flow + Dagre layout with swimlanes
+                    React Flow + Dagre layout with dynamic swimlanes and CALLS/IMPORTS/INHERITS edges
                   </td>
                 </tr>
                 <tr>
-                  <td className="px-5 py-3 text-text">Impact Analysis</td>
+                  <td className="px-5 py-3 text-text">Impact Analysis & Connection Tracing</td>
                   <td className="px-5 py-3">
                     <Badge variant="green">Live</Badge>
                   </td>
                   <td className="px-5 py-3 text-subtle text-xs hidden sm:table-cell">
-                    BFS traversal with depth, risk scoring
+                    Multi-hop BFS blast radius calculation and bidirectional shortest path tracing
                   </td>
                 </tr>
                 <tr>
-                  <td className="px-5 py-3 text-text">AI Assistant (Mock)</td>
+                  <td className="px-5 py-3 text-text">AI Assistant (Agentic RAG)</td>
                   <td className="px-5 py-3">
                     <Badge variant="green">Live</Badge>
                   </td>
                   <td className="px-5 py-3 text-subtle text-xs hidden sm:table-cell">
-                    Keyword-matched answers with citations
+                    4-stage LangGraph agent (Plan → Retrieve → Generate → Verify) with verified AST citations
                   </td>
                 </tr>
                 <tr>
                   <td className="px-5 py-3 text-text">Neo4j Persistence</td>
                   <td className="px-5 py-3">
-                    <Badge variant="neutral">Planned</Badge>
+                    <Badge variant="green">Live</Badge>
                   </td>
                   <td className="px-5 py-3 text-subtle text-xs hidden sm:table-cell">
-                    Currently in-memory graph
+                    Neo4j Aura Cloud persistent knowledge graph with unique constraints and Cypher queries
                   </td>
                 </tr>
                 <tr>
                   <td className="px-5 py-3 text-text">Qdrant Vector Search</td>
                   <td className="px-5 py-3">
-                    <Badge variant="neutral">Planned</Badge>
+                    <Badge variant="green">Live</Badge>
                   </td>
                   <td className="px-5 py-3 text-subtle text-xs hidden sm:table-cell">
-                    Semantic code search via embeddings
+                    Qdrant Cloud vector embeddings with cosine similarity search & scoped repository deletion
                   </td>
                 </tr>
                 <tr>
                   <td className="px-5 py-3 text-text">BM25 Keyword Search</td>
                   <td className="px-5 py-3">
-                    <Badge variant="neutral">Planned</Badge>
+                    <Badge variant="green">Live</Badge>
                   </td>
                   <td className="px-5 py-3 text-subtle text-xs hidden sm:table-cell">
-                    Hybrid retrieval with vector search
+                    Code-aware identifier BM25 tokenization with disk caching and RRF fusion
                   </td>
                 </tr>
                 <tr>
-                  <td className="px-5 py-3 text-text">LLM Answer Generation</td>
+                  <td className="px-5 py-3 text-text">Grounded Answer Generation</td>
                   <td className="px-5 py-3">
-                    <Badge variant="neutral">Planned</Badge>
+                    <Badge variant="green">Live</Badge>
                   </td>
                   <td className="px-5 py-3 text-subtle text-xs hidden sm:table-cell">
-                    Grounded answers with verification
+                    Live LLM answer generation with deterministic grounded fallback & AST call hierarchy verification
                   </td>
                 </tr>
               </tbody>

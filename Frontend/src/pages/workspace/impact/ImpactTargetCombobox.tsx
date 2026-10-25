@@ -2,7 +2,7 @@ import React, { useState, useRef, useEffect, useMemo } from 'react';
 import { Search, X, FileCode, Box, Layers, Check } from 'lucide-react';
 import { MOCK_FILES, MOCK_SYMBOLS } from '../../../mocks/repo';
 
-interface TargetOption {
+export interface TargetOption {
   id: string;
   label: string;
   sublabel: string;
@@ -12,11 +12,13 @@ interface TargetOption {
 interface ImpactTargetComboboxProps {
   selectedTargets: string[];
   onChange: (targets: string[]) => void;
+  options?: TargetOption[];
 }
 
 export const ImpactTargetCombobox: React.FC<ImpactTargetComboboxProps> = ({
   selectedTargets,
   onChange,
+  options,
 }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [query, setQuery] = useState('');
@@ -25,6 +27,8 @@ export const ImpactTargetCombobox: React.FC<ImpactTargetComboboxProps> = ({
 
   // Compile all available options
   const allOptions = useMemo<TargetOption[]>(() => {
+    if (options !== undefined) return options;
+
     const fileOptions: TargetOption[] = MOCK_FILES.map(f => {
       const parts = f.path.split('/');
       const fileName = parts[parts.length - 1];
@@ -55,7 +59,7 @@ export const ImpactTargetCombobox: React.FC<ImpactTargetComboboxProps> = ({
     }));
 
     return [...fileOptions, ...functionOptions, ...classOptions];
-  }, []);
+  }, [options]);
 
   // Filter options based on query
   const filteredOptions = useMemo(() => {

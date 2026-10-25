@@ -1,5 +1,5 @@
-import React, { useEffect, useState, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import React, { useEffect, useState, useRef, useMemo } from 'react';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   X,
   FileCode,
@@ -14,8 +14,8 @@ import {
   Terminal,
 } from 'lucide-react';
 import { useAppStore } from '../../store/useAppStore';
-import { getFile } from '../../api/client';
-import type { FileContent } from '../../types/api';
+import { getFile, getGraph } from '../../api/client';
+import type { FileContent, GraphNode, GraphEdge } from '../../types/api';
 import { MOCK_SYMBOLS } from '../../mocks/repo';
 import { Skeleton } from '../../components/ui/Skeleton';
 import { EmptyState } from '../../components/ui/EmptyState';
@@ -27,7 +27,7 @@ interface RelationInfo {
   symbol: string;
   file: string;
   line: number;
-  kind: 'calls' | 'called_by' | 'imports' | 'inherits';
+  kind: 'calls' | 'called_by' | 'imports' | 'inherits' | 'defines';
 }
 
 interface SymbolGraphRelations {
@@ -121,9 +121,24 @@ export const CodeViewPage: React.FC = () => {
   // _resolve_public_repo understands owner/repo slugs natively.  Numeric GitHub
   // IDs (which selectedRepo.id previously held for OAuth repos) are NOT
   // resolvable by the backend and produced 404 errors.
-  const repoId = selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'my-store';
+  const { repoId: routeRepoId } = useParams<{ repoId: string }>();
+  const repoId = routeRepoId
+    ? decodeURIComponent(routeRepoId)
+    : selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'my-store';
   const orgName = selectedRepo?.full_name?.split('/')[0] || 'acme';
   const isMockDemo = repoId === 'my-store' || repoId === 'repo-1' || repoId === 'default';
+
+  const [graphData, setGraphData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] }>({ nodes: [], edges: [] });
+
+  useEffect(() => {
+    let isMounted = true;
+    if (repoId) {
+      getGraph(repoId, 'symbol').then(res => {
+        if (isMounted) setGraphData(res);
+      }).catch(() => {});
+    }
+    return () => { isMounted = false; };
+  }, [repoId]);
 
   const [fileData, setFileData] = useState<FileContent | null>(null);
   const [loading, setLoading] = useState(false);
@@ -327,13 +342,81 @@ export const CodeViewPage: React.FC = () => {
 
   // Check if line defines a function
   const getFunctionAtLine = (lineNum: number) => {
-    if (!isMockDemo) return null;
-    const sym = MOCK_SYMBOLS.find(
-      s => s.file === activeFile && (s.kind === 'function' || s.kind === 'method') && s.start_line === lineNum
+    if (isMockDemo) {
+      const sym = MOCK_SYMBOLS.find(
+        s => s.file === activeFile && (s.kind === 'function' || s.kind === 'method') && s.start_line === lineNum
+      );
+      if (!sym) return null;
+      return { name: sym.label, kind: sym.kind, start_line: sym.start_line || lineNum };
+    }
+    const currentPath = activeFile || '';
+    const sym = graphData.nodes.find(
+      n => (n.file === currentPath || currentPath.endsWith(n.file || '')) &&
+           (n.kind === 'function' || n.kind === 'method' || n.kind === 'class') &&
+           n.start_line === lineNum
     );
     if (!sym) return null;
     return { name: sym.label, kind: sym.kind, start_line: sym.start_line || lineNum };
   };
+
+  // Active function relations (must be defined BEFORE any early returns so Hook count is invariant)
+  const currentRelations = useMemo<{
+    callers: RelationInfo[];
+    callees: RelationInfo[];
+    unresolved: Array<{ symbol: string; line: number; reason: string }>;
+  }>(() => {
+    if (isMockDemo) {
+      return (
+        (SYMBOL_RELATIONS[activeFunctionSymbol] as {
+          callers: RelationInfo[];
+          callees: RelationInfo[];
+          unresolved: Array<{ symbol: string; line: number; reason: string }>;
+        }) || {
+          callers: [],
+          callees: [],
+          unresolved: [],
+        }
+      );
+    }
+    const callers: RelationInfo[] = [];
+    const callees: RelationInfo[] = [];
+    const unresolved: Array<{ symbol: string; line: number; reason: string }> = [];
+
+    const activeNode = graphData.nodes.find(
+      n => n.label === activeFunctionSymbol || n.id.endsWith(`:${activeFunctionSymbol}`)
+    );
+    const activeId = activeNode?.id || activeFunctionSymbol;
+
+    graphData.edges.forEach(e => {
+      if (e.target === activeId || e.target.endsWith(`:${activeFunctionSymbol}`) || e.target === activeFunctionSymbol) {
+        const srcNode = graphData.nodes.find(n => n.id === e.source);
+        callers.push({
+          symbol: srcNode?.label || e.source.split(':').pop() || e.source,
+          file: srcNode?.file || 'unknown',
+          line: e.line || srcNode?.start_line || 1,
+          kind: e.kind || 'calls',
+        });
+      }
+      if (e.source === activeId || e.source.endsWith(`:${activeFunctionSymbol}`) || e.source === activeFunctionSymbol) {
+        const tgtNode = graphData.nodes.find(n => n.id === e.target);
+        callees.push({
+          symbol: tgtNode?.label || e.target.split(':').pop() || e.target,
+          file: tgtNode?.file || 'unknown',
+          line: e.line || tgtNode?.start_line || 1,
+          kind: e.kind || 'calls',
+        });
+      }
+      if (!e.resolved && (e.source === activeId || e.target === activeId)) {
+        unresolved.push({
+          symbol: e.target.split(':').pop() || e.target,
+          line: e.line || 1,
+          reason: 'Dynamic invocation or unresolved import',
+        });
+      }
+    });
+
+    return { callers, callees, unresolved };
+  }, [isMockDemo, activeFunctionSymbol, graphData.nodes, graphData.edges]);
 
   // State: No file open
   if (openTabs.length === 0 || !activeFile) {
@@ -371,7 +454,7 @@ export const CodeViewPage: React.FC = () => {
         <ErrorState
           title="Could not load file"
           whatHappened={error}
-          nextStep="Verify repository indexing status and retry."
+          nextStep="Select another file from the left explorer tree."
           onRetry={() => {
             if (activeFile) openFile(activeFile);
           }}
@@ -383,14 +466,6 @@ export const CodeViewPage: React.FC = () => {
   const lines = fileData?.content ? fileData.content.split('\n') : [];
   const fileName = activeFile.split('/').pop() || activeFile;
   const isFileTooLarge = (fileData?.size_bytes || 0) > 100000 || lines.length > 2000;
-
-  // Active function relations
-  const currentRelations =
-    SYMBOL_RELATIONS[activeFunctionSymbol] || {
-      callers: [],
-      callees: [],
-      unresolved: [],
-    };
 
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-ide text-text font-sans select-none relative">
@@ -665,7 +740,7 @@ export const CodeViewPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
-                  navigate(`/w/${repoId}/connections?source=${funcContextMenu.symbolName}`);
+                  navigate(`/w/${encodeURIComponent(repoId)}/connections?source=${encodeURIComponent(funcContextMenu.symbolName)}`);
                   setFuncContextMenu(null);
                 }}
                 className="w-full flex items-center gap-2 px-2 py-1.5 text-left rounded hover:bg-raised text-text transition-colors"
@@ -676,7 +751,7 @@ export const CodeViewPage: React.FC = () => {
               <button
                 type="button"
                 onClick={() => {
-                  navigate(`/w/${repoId}/impact`);
+                  navigate(`/w/${encodeURIComponent(repoId)}/impact`);
                   setFuncContextMenu(null);
                 }}
                 className="w-full flex items-center gap-2 px-2 py-1.5 text-left rounded hover:bg-raised text-text transition-colors"
@@ -775,13 +850,9 @@ export const CodeViewPage: React.FC = () => {
               {/* TAB 1: CALLERS */}
               {bottomTab === 'callers' && (
                 <div className="space-y-1.5">
-                  {!isMockDemo ? (
+                  {currentRelations.callers.length === 0 ? (
                     <div className="text-subtle text-xs p-2">
-                      Repository source code loaded directly from GitHub. Graph extraction and callers analysis will be available once repository indexing is run.
-                    </div>
-                  ) : currentRelations.callers.length === 0 ? (
-                    <div className="text-subtle text-xs p-2">
-                      No incoming callers detected in the AST graph for {activeFunctionSymbol}.
+                      No incoming callers detected in the AST graph for {activeFunctionSymbol || 'this file'}.
                     </div>
                   ) : (
                     currentRelations.callers.map((c, i) => (

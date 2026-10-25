@@ -1,0 +1,18 @@
+{
+  "pallets-flask": {
+    "repo_id": "pallets-flask",
+    "repo_name": "flask",
+    "full_name": "pallets/flask",
+    "owner": "pallets",
+    "repo": "flask",
+    "default_branch": "main"
+  },
+  "pallets/flask": {
+    "repo_id": "pallets-flask",
+    "repo_name": "flask",
+    "full_name": "pallets/flask",
+    "owner": "pallets",
+    "repo": "flask",
+    "default_branch": "main"
+  }
+}

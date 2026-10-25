@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useMemo, useCallback, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   ReactFlow,
   Background,
@@ -31,7 +31,7 @@ import {
   Maximize2,
   Focus,
 } from 'lucide-react';
-import { getGraph, getRepoStats, USE_MOCKS } from '../../api/client';
+import { getGraph, getNodeDetail, getRepoStats, USE_MOCKS } from '../../api/client';
 import type { RepoStats, GraphData } from '../../types/api';
 import { MOCK_FILES as MOCK_FILE_CONTENTS, MOCK_EDGES } from '../../mocks/repo';
 import { useAppStore } from '../../store/useAppStore';
@@ -91,22 +91,17 @@ function getFolderCategory(path: string): string {
   if (FOLDER_CATEGORIES[path]) return FOLDER_CATEGORIES[path];
   const p = path.toLowerCase();
   
-  if (p.includes('/test') || p.includes('/__tests__') || p.includes('.test.') || p.includes('.spec.')) {
+  if (p.includes('/test') || p.startsWith('test') || p.includes('.test.') || p.includes('.spec.')) {
     return 'tests';
   }
-  if (p.includes('/api/') || p.includes('/routes/') || p.includes('/controllers/') || p.includes('/endpoints/')) {
-    return 'api';
+  const parts = path.split('/');
+  if (parts.length > 1) {
+    if (['src', 'app', 'lib', 'packages'].includes(parts[0]) && parts.length > 2) {
+      return `${parts[0]}/${parts[1]}`;
+    }
+    return parts[0];
   }
-  if (p.includes('/models/') || p.includes('/types/') || p.includes('/schemas/') || p.includes('/entities/') || p.includes('/interfaces/')) {
-    return 'models';
-  }
-  if (p.includes('/utils/') || p.includes('/lib/') || p.includes('/context/') || p.includes('/helpers/') || p.includes('/config/')) {
-    return 'utils';
-  }
-  if (p.includes('/components/') || p.includes('/views/') || p.includes('/app/') || p.includes('/pages/') || p.includes('/ui/')) {
-    return 'services';
-  }
-  return 'services';
+  return 'root';
 }
 
 function formatFileDisplayName(fullPath: string): { fileName: string; folderPrefix: string } {
@@ -243,8 +238,11 @@ const GraphViewInner: React.FC = () => {
     selectedRepo,
   } = useAppStore();
 
-  const repoId = selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'default';
-  const repoDisplayName = selectedRepo?.repo_name || selectedRepo?.full_name || 'my-store';
+  const { repoId: routeRepoId } = useParams<{ repoId: string }>();
+  const repoId = routeRepoId
+    ? decodeURIComponent(routeRepoId)
+    : selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'default';
+  const repoDisplayName = selectedRepo?.repo_name || selectedRepo?.full_name || repoId || 'my-store';
 
   const [viewMode, setViewMode]     = useState<'files' | 'symbols'>('files');
   const [loading, setLoading]       = useState(true);
@@ -263,7 +261,7 @@ const GraphViewInner: React.FC = () => {
       const res = await fetch(`/api/repos/${encodeURIComponent(repoId)}/graph/index`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ clear_existing: false, max_files: 100 }),
+        body: JSON.stringify({ clear_existing: true, max_files: 100 }),
       });
       if (!res.ok) {
         let msg = `Indexing failed (HTTP ${res.status})`;
@@ -290,7 +288,7 @@ const GraphViewInner: React.FC = () => {
     showImports: true,
     showInherits: true,
     showUnresolved: true,
-    selectedFilePaths: new Set(MOCK_FILE_CONTENTS.map(f => f.path)),
+    selectedFilePaths: new Set<string>(),
   });
 
   const [selectedNodeId, setSelectedNodeId]         = useState<string | null>(null);
@@ -371,9 +369,24 @@ const GraphViewInner: React.FC = () => {
 
     const filePathsSet = new Set(activeFiles.map(f => f.path));
     const resolveToFile = (ref: string): string | null => {
+      if (!ref) return null;
       if (filePathsSet.has(ref)) return ref;
       if (nodeIdToFile[ref]) return nodeIdToFile[ref];
-      for (const f of activeFiles) if (ref.includes(f.path)) return f.path;
+      if (ref.includes(':')) {
+        const parts = ref.split(':');
+        if (parts.length >= 2) {
+          const candidate = parts[1];
+          if (filePathsSet.has(candidate)) return candidate;
+          for (const f of activeFiles) {
+            if (candidate.endsWith(f.path) || f.path.endsWith(candidate)) return f.path;
+          }
+        }
+      }
+      for (const f of activeFiles) {
+        if (ref.includes(f.path) || (f.path.includes('/') && ref.includes(f.path.split('/').pop()!))) {
+          return f.path;
+        }
+      }
       return null;
     };
 
@@ -426,7 +439,7 @@ const GraphViewInner: React.FC = () => {
 
   // ── Folder structure for sidebar ───────────────────────────────────────────
   const folderStructure = useMemo<Record<string, FolderFileItem[]>>(() => {
-    const groups: Record<string, FolderFileItem[]> = { api: [], services: [], models: [], utils: [], tests: [] };
+    const groups: Record<string, FolderFileItem[]> = {};
     activeFiles.forEach(f => {
       const folder = getFolderCategory(f.path);
       if (!groups[folder]) groups[folder] = [];
@@ -460,7 +473,9 @@ const GraphViewInner: React.FC = () => {
     const nodeH = isSymbolsMode ? NODE_H_SYMBOLS : NODE_H_FILES;
     const activePaths = filters.selectedFilePaths;
 
-    let visibleFiles = activeFiles.filter(f => activePaths.has(f.path));
+    let visibleFiles = filters.selectedFilePaths.size === 0
+      ? activeFiles
+      : activeFiles.filter(f => activePaths.has(f.path));
 
     // Focus mode: only connected nodes
     if (focusTarget) {
@@ -482,9 +497,7 @@ const GraphViewInner: React.FC = () => {
     const newEdges: Edge[] = [];
     const nodePositionMap: Record<string, { x: number; y: number }> = {};
 
-    const filesByFolder: Record<string, typeof visibleFiles> = {
-      api: [], services: [], models: [], utils: [], tests: [],
-    };
+    const filesByFolder: Record<string, typeof visibleFiles> = {};
     visibleFiles.forEach(f => {
       const cat = getFolderCategory(f.path);
       if (!filesByFolder[cat]) filesByFolder[cat] = [];
@@ -493,7 +506,10 @@ const GraphViewInner: React.FC = () => {
 
     if (filters.groupByFolder) {
       // ── Swimlane grouped layout ──────────────────────────────────────────
-      const topFolders = ['api', 'services', 'models', 'utils'];
+      const allFolders = Object.keys(filesByFolder).filter(f => filesByFolder[f].length > 0);
+      const testFolders = allFolders.filter(f => f === 'tests' || f.endsWith('/tests') || f === 'test');
+      const topFolders = allFolders.filter(f => !testFolders.includes(f));
+
       let curX = 40;
       let maxTopH = 200;
 
@@ -557,9 +573,12 @@ const GraphViewInner: React.FC = () => {
       });
 
       // ── Tests swimlane (bottom row) ────────────────────────────────────
-      const testFiles = filesByFolder.tests || [];
-      if (testFiles.length > 0) {
-        const testsGroupId = 'group-tests';
+      let testCurX = 40;
+      testFolders.forEach(testFolder => {
+        const testFiles = filesByFolder[testFolder] || [];
+        if (testFiles.length === 0) return;
+
+        const testsGroupId = `group-${testFolder}`;
         const testsY = maxTopH + GROUP_GAP_Y;
         const testCols = Math.min(4, Math.max(1, Math.ceil(testFiles.length / 2)));
         const testRows = Math.ceil(testFiles.length / testCols);
@@ -579,8 +598,8 @@ const GraphViewInner: React.FC = () => {
         newNodes.push({
           id: testsGroupId,
           type: 'swimlaneGroup',
-          position: { x: 40, y: testsY },
-          data: { label: 'tests', fileCount: testFiles.length, width: testGroupW, height: testGroupH } as SwimlaneGroupData,
+          position: { x: testCurX, y: testsY },
+          data: { label: testFolder, fileCount: testFiles.length, width: testGroupW, height: testGroupH } as SwimlaneGroupData,
           draggable: false,
           selectable: false,
         });
@@ -588,7 +607,7 @@ const GraphViewInner: React.FC = () => {
         testChildNodes.forEach(child => {
           const fileObj = testFiles.find(f => f.path === child.path)!;
           const { fileName, folderPrefix } = formatFileDisplayName(fileObj.path);
-          nodePositionMap[fileObj.path] = { x: 40 + child.relX, y: testsY + child.relY };
+          nodePositionMap[fileObj.path] = { x: testCurX + child.relX, y: testsY + child.relY };
           newNodes.push({
             id: fileObj.path,
             type: 'fileCard',
@@ -609,7 +628,9 @@ const GraphViewInner: React.FC = () => {
             } as FileCardData,
           });
         });
-      }
+
+        testCurX += testGroupW + GROUP_GAP_X;
+      });
     } else {
       // ── Ungrouped layout ───────────────────────────────────────────────
       const cols = Math.min(6, Math.max(2, Math.ceil(Math.sqrt(visibleFiles.length * 1.5))));
@@ -837,6 +858,74 @@ const GraphViewInner: React.FC = () => {
       incoming,
       outgoing,
     });
+
+    const isDemo = !repoId || repoId === 'my-store' || repoId === 'repo-1' || repoId === 'default';
+    if ((!USE_MOCKS || !isDemo) && repoId && repoId !== 'default') {
+      getNodeDetail(node.id, repoId)
+        .then(detail => {
+          if (!detail || !detail.node) return;
+          setSelectedItemDetail(prev => {
+            if (!prev || prev.id !== node.id) return prev;
+            const inc = [...prev.incoming];
+            (detail.callers || []).forEach(c => {
+              const srcLabel = c.label || c.id.split(':').pop() || c.id;
+              if (!inc.some(x => x.source === srcLabel)) {
+                inc.push({
+                  source: srcLabel,
+                  file: c.file || c.id,
+                  line: c.start_line || 0,
+                  kind: 'calls',
+                  resolved: true,
+                });
+              }
+            });
+            (detail.imported_by || []).forEach(c => {
+              const srcLabel = c.label || c.id.split(':').pop() || c.id;
+              if (!inc.some(x => x.source === srcLabel)) {
+                inc.push({
+                  source: srcLabel,
+                  file: c.file || c.id,
+                  line: c.start_line || 0,
+                  kind: 'imports',
+                  resolved: true,
+                });
+              }
+            });
+            const out = [...prev.outgoing];
+            (detail.callees || []).forEach(c => {
+              const tgtLabel = c.label || c.id.split(':').pop() || c.id;
+              if (!out.some(x => x.target === tgtLabel)) {
+                out.push({
+                  target: tgtLabel,
+                  file: c.file || c.id,
+                  line: c.start_line || 0,
+                  kind: 'calls',
+                  resolved: true,
+                });
+              }
+            });
+            (detail.imports || []).forEach(c => {
+              const tgtLabel = c.label || c.id.split(':').pop() || c.id;
+              if (!out.some(x => x.target === tgtLabel)) {
+                out.push({
+                  target: tgtLabel,
+                  file: c.file || c.id,
+                  line: c.start_line || 0,
+                  kind: 'imports',
+                  resolved: true,
+                });
+              }
+            });
+            return {
+              ...prev,
+              summary: detail.node.description || prev.summary,
+              incoming: inc,
+              outgoing: out,
+            };
+          });
+        })
+        .catch(() => {});
+    }
   };
 
   const onEdgeMouseEnter = useCallback((event: React.MouseEvent, edge: Edge) => {

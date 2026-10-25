@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useRef } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import {
   Folder,
   FolderOpen,
@@ -68,7 +68,10 @@ export const LeftExplorerPanel: React.FC = () => {
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const contextMenuRef = useRef<HTMLDivElement>(null);
 
-  const repoId = selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'my-store';
+  const { repoId: routeRepoId } = useParams<{ repoId: string }>();
+  const repoId = routeRepoId
+    ? decodeURIComponent(routeRepoId)
+    : selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'my-store';
   const isMockDemo = repoId === 'my-store' || repoId === 'repo-1' || repoId === 'default';
 
   useEffect(() => {
@@ -80,6 +83,29 @@ export const LeftExplorerPanel: React.FC = () => {
           const topLevelDirs = t.children.filter(c => c.type === 'directory').map(c => c.path);
           if (topLevelDirs.length > 0) {
             setExpandedPaths(prev => new Set([...prev, ...topLevelDirs]));
+          }
+          const findFirstFile = (node: TreeNode): string | null => {
+            if (node.type === 'file') return node.path;
+            if (node.children) {
+              for (const child of node.children) {
+                const res = findFirstFile(child);
+                if (res) return res;
+              }
+            }
+            return null;
+          };
+          const first = findFirstFile(t);
+          if (first) {
+            // Auto-open first file for realistic repo experience if no file is selected
+            // or if currently selected activeFile doesn't belong to this repo
+            const activeBelongs = (node: TreeNode, path: string): boolean => {
+              if (node.path === path) return true;
+              if (node.children) return node.children.some(c => activeBelongs(c, path));
+              return false;
+            };
+            if (!activeFile || !activeBelongs(t, activeFile)) {
+              openTab(first);
+            }
           }
         }
       }
@@ -141,12 +167,12 @@ export const LeftExplorerPanel: React.FC = () => {
   const handleCompareConnections = () => {
     if (multiSelection.length === 2) {
       navigate(
-        `/w/${repoId}/connections?source=${encodeURIComponent(
+        `/w/${encodeURIComponent(repoId)}/connections?source=${encodeURIComponent(
           multiSelection[0]
         )}&target=${encodeURIComponent(multiSelection[1])}`
       );
     } else {
-      navigate(`/w/${repoId}/connections`);
+      navigate(`/w/${encodeURIComponent(repoId)}/connections`);
     }
   };
 
@@ -383,7 +409,7 @@ export const LeftExplorerPanel: React.FC = () => {
               type="button"
               onClick={() => {
                 setMultiSelection([contextMenu.file.path]);
-                navigate(`/w/${repoId}/connections?source=${encodeURIComponent(contextMenu.file.path)}`);
+                navigate(`/w/${encodeURIComponent(repoId)}/connections?source=${encodeURIComponent(contextMenu.file.path)}`);
                 setContextMenu(null);
               }}
               className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left rounded hover:bg-raised text-text transition-colors"
@@ -397,7 +423,7 @@ export const LeftExplorerPanel: React.FC = () => {
             <button
               type="button"
               onClick={() => {
-                navigate(`/w/${repoId}/graph`);
+                navigate(`/w/${encodeURIComponent(repoId)}/graph`);
                 setContextMenu(null);
               }}
               className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left rounded hover:bg-raised text-text transition-colors"
@@ -408,7 +434,7 @@ export const LeftExplorerPanel: React.FC = () => {
             <button
               type="button"
               onClick={() => {
-                navigate(`/w/${repoId}/impact`);
+                navigate(`/w/${encodeURIComponent(repoId)}/impact`);
                 setContextMenu(null);
               }}
               className="w-full flex items-center gap-2 px-2.5 py-1.5 text-left rounded hover:bg-raised text-text transition-colors"

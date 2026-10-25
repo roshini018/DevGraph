@@ -300,7 +300,7 @@ export const GraphControlsSidebar: React.FC<GraphControlsSidebarProps> = ({
 
           {openSections.files && (
             <div className="space-y-2.5 pt-1 font-mono text-xs">
-              {Object.entries(folderStructure).map(([folderName, files]) => {
+              {Object.entries(folderStructure).filter(([_, files]) => files.length > 0).map(([folderName, files]) => {
                 const selectedCount = files.filter(f =>
                   filters.selectedFilePaths.has(f.path)
                 ).length;

@@ -219,6 +219,16 @@ export const ImpactFindingsTab: React.FC<ImpactFindingsTabProps> = ({
         </div>
       )}
 
+      {/* Empty State */}
+      {findings.length === 0 && affectedModules.length === 0 && (
+        <div className="p-8 text-center text-sm font-mono text-muted bg-surface rounded-lg border border-line">
+          <p className="text-text font-medium mb-1">No downstream dependents or callers detected</p>
+          <p className="text-xs text-subtle">
+            Modifying this target has an isolated blast radius with no upstream call sites or imports in the indexed knowledge graph.
+          </p>
+        </div>
+      )}
+
       {/* Group 4: Affected Modules */}
       {affectedModules.length > 0 && (
         <div className="space-y-2.5">

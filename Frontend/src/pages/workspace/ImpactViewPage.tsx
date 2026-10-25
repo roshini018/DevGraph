@@ -6,22 +6,24 @@ import {
   AlertTriangle,
   Sparkles,
 } from 'lucide-react';
-import { getImpact } from '../../api/client';
+import { getImpact, getGraph } from '../../api/client';
 import { useAppStore } from '../../store/useAppStore';
 import { Button } from '../../components/ui/Button';
 import { RiskPill } from '../../components/ui/RiskPill';
 import { VerdictBanner } from '../../components/ui/VerdictBanner';
 import { Skeleton } from '../../components/ui/Skeleton';
 import { ErrorState } from '../../components/ui/ErrorState';
-import { ImpactTargetCombobox } from './impact/ImpactTargetCombobox';
+import { ImpactTargetCombobox, type TargetOption } from './impact/ImpactTargetCombobox';
 import { ImpactGraphCanvas } from './impact/ImpactGraphCanvas';
 import { ImpactFindingsTab } from './impact/ImpactFindingsTab';
 import { ImpactChecksTab } from './impact/ImpactChecksTab';
 import type { EnrichedFinding, TestCaseItem, ImpactStateData } from './impact/types';
-import { MOCK_SYMBOLS, MOCK_FILES, MOCK_EDGES } from '../../mocks/repo';
+import type { GraphNode, GraphEdge } from '../../types/api';
+import { MOCK_SYMBOLS, MOCK_EDGES } from '../../mocks/repo';
 
 export const ImpactViewPage: React.FC = () => {
-  const { repoId = 'my-store' } = useParams();
+  const { repoId: rawRepoId = 'my-store' } = useParams();
+  const repoId = decodeURIComponent(rawRepoId);
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
   const queryTarget = searchParams.get('target');
@@ -35,12 +37,29 @@ export const ImpactViewPage: React.FC = () => {
     setGraphSelection,
   } = useAppStore();
 
-  // Targets state: default to 'charge_payment' on first visit if none set
+  const isDemo = !repoId || repoId === 'my-store' || repoId === 'repo-1' || repoId === 'default';
+
+  const [graphData, setGraphData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] }>({ nodes: [], edges: [] });
+
+  useEffect(() => {
+    let isMounted = true;
+    getGraph(repoId, 'symbol').then(res => {
+      if (isMounted) setGraphData(res);
+    }).catch(() => {});
+    return () => { isMounted = false; };
+  }, [repoId]);
+
+  // Targets state: default to first real symbol if not demo and none set
   const initialTargets = useMemo(() => {
     if (queryTarget) return [queryTarget];
     if (impactTargets.length > 0) return impactTargets;
-    return ['charge_payment'];
-  }, [queryTarget, impactTargets]);
+    if (isDemo) return ['charge_payment'];
+    if (graphData.nodes.length > 0) {
+      const firstFunc = graphData.nodes.find(n => n.kind === 'function' || n.kind === 'class' || n.kind === 'method');
+      return firstFunc ? [firstFunc.label || firstFunc.id] : [graphData.nodes[0].label || graphData.nodes[0].id];
+    }
+    return [];
+  }, [queryTarget, impactTargets, isDemo, graphData.nodes]);
 
   const [targets, setTargets] = useState<string[]>(initialTargets);
   const [depth, setDepth] = useState<number>(3);
@@ -54,12 +73,72 @@ export const ImpactViewPage: React.FC = () => {
   const [analysisData, setAnalysisData] = useState<ImpactStateData | null>(null);
 
   // Quick picks
-  const quickPicks = [
-    { id: 'charge_payment', label: 'charge_payment', type: 'func' },
-    { id: 'validate_amount', label: 'validate_amount', type: 'func' },
-    { id: 'order_service.py', label: 'order_service.py', type: 'file' },
-    { id: 'logger.py', label: 'logger.py', type: 'file' },
-  ];
+  const quickPicks = useMemo(() => {
+    if (isDemo) {
+      return [
+        { id: 'charge_payment', label: 'charge_payment', type: 'func' },
+        { id: 'validate_amount', label: 'validate_amount', type: 'func' },
+        { id: 'order_service.py', label: 'order_service.py', type: 'file' },
+        { id: 'logger.py', label: 'logger.py', type: 'file' },
+      ];
+    }
+    const symbols = graphData.nodes.filter(n => n.kind === 'function' || n.kind === 'class' || n.kind === 'method');
+    const files = graphData.nodes.filter(n => n.kind === 'file');
+    const picks = [];
+    if (symbols.length > 0) picks.push({ id: symbols[0].label || symbols[0].id, label: symbols[0].label, type: symbols[0].kind === 'class' ? 'class' : 'func' });
+    if (symbols.length > 1) picks.push({ id: symbols[1].label || symbols[1].id, label: symbols[1].label, type: symbols[1].kind === 'class' ? 'class' : 'func' });
+    if (files.length > 0) {
+      const fName = files[0].file?.split('/').pop() || files[0].label;
+      picks.push({ id: files[0].file || files[0].id, label: fName, type: 'file' });
+    }
+    if (symbols.length > 2) picks.push({ id: symbols[2].label || symbols[2].id, label: symbols[2].label, type: 'func' });
+    return picks;
+  }, [isDemo, graphData.nodes]);
+
+  // Target options for combobox
+  const targetOptions: TargetOption[] = useMemo(() => {
+    if (isDemo) return [];
+
+    const fileMap = new Map<string, TargetOption>();
+    const funcMap = new Map<string, TargetOption>();
+    const classMap = new Map<string, TargetOption>();
+
+    graphData.nodes.forEach(n => {
+      const fp = n.kind === 'file' ? (n.file || n.id) : n.file;
+      if (fp && !fileMap.has(fp)) {
+        const name = fp.split('/').pop() || fp;
+        fileMap.set(fp, { id: fp, label: name, sublabel: fp, group: 'Files' });
+      }
+
+      if (n.kind === 'function' || n.kind === 'method') {
+        const id = n.label || n.id;
+        if (!funcMap.has(id)) {
+          funcMap.set(id, {
+            id,
+            label: n.label || id,
+            sublabel: `${n.file || ''}:${n.start_line || 1}`,
+            group: 'Functions',
+          });
+        }
+      } else if (n.kind === 'class') {
+        const id = n.label || n.id;
+        if (!classMap.has(id)) {
+          classMap.set(id, {
+            id,
+            label: n.label || id,
+            sublabel: `${n.file || ''}:${n.start_line || 1}`,
+            group: 'Classes',
+          });
+        }
+      }
+    });
+
+    return [
+      ...Array.from(fileMap.values()),
+      ...Array.from(funcMap.values()),
+      ...Array.from(classMap.values()),
+    ];
+  }, [isDemo, graphData.nodes]);
 
   // Run impact analysis
   const runAnalysis = useCallback(
@@ -78,18 +157,23 @@ export const ImpactViewPage: React.FC = () => {
 
         // Target set for filtering
         const targetSet = new Set(targetsToAnalyze);
+        const edgePool = isDemo ? MOCK_EDGES : graphData.edges;
 
         // Build enriched findings
         const findings: EnrichedFinding[] = res.impacted_nodes.map(node => {
-          const sym = MOCK_SYMBOLS.find(s => s.id === node.node_id);
-          const edge = MOCK_EDGES.find(
+          const sym = isDemo
+            ? MOCK_SYMBOLS.find(s => s.id === node.node_id)
+            : graphData.nodes.find(n => n.id === node.node_id || n.label === node.node_id || n.id.endsWith(`:${node.node_id}`));
+          const edge = edgePool.find(
             e =>
-              e.source === node.node_id &&
-              (targetSet.has(e.target) || node.path.includes(e.target))
+              (e.source === node.node_id || e.source.endsWith(`:${node.node_id}`)) &&
+              (targetSet.has(e.target) || node.path.includes(e.target) || targetSet.has(e.target.split(':').pop()!))
           );
 
           const isTest =
-            sym?.file.startsWith('tests/') || node.node_id.startsWith('test_');
+            (sym?.file && (sym.file.startsWith('tests/') || sym.file.includes('test'))) ||
+            node.node_id.startsWith('test_') ||
+            node.node_id.includes('test');
           const hasUnresolved = edge?.resolved === false;
 
           let whyAffected = '';
@@ -106,34 +190,34 @@ export const ImpactViewPage: React.FC = () => {
               .join(' → ')} may encounter unexpected schema variations.`;
           }
 
-          // Extract code snippet from file
+          // Extract code snippet from file or symbol signature/docstring
           let snippet = '';
-          if (sym?.file) {
-            const fileObj = MOCK_FILES.find(f => f.path === sym.file);
-            if (fileObj) {
-              const lines = fileObj.content.split('\n');
-              const focusLine = edge?.line || sym.start_line || 1;
-              const sLine = Math.max(1, focusLine - 1);
-              const eLine = Math.min(lines.length, focusLine + 3);
-              snippet = lines
-                .slice(sLine - 1, eLine)
-                .map((l, i) => `${sLine + i} | ${l}`)
-                .join('\n');
-            }
+          if (sym?.signature) {
+            snippet = sym.signature;
+            if (sym.docstring) snippet += `\n    """${sym.docstring.slice(0, 100)}..."""`;
+          } else if (sym?.description) {
+            snippet = sym.description;
+          } else if (sym?.file) {
+            const symName = sym?.label || node.node_id.split(':').pop() || 'symbol';
+            snippet = `# ${sym.kind || 'Component'} defined in ${sym.file}\n# Blast radius dependent of ${targetsToAnalyze.join(', ')}\n${sym.kind || 'def'} ${symName}`;
           }
+
+          const resolvedFile = sym?.file || (node.node_id.includes(':') ? node.node_id.split(':')[1] : 'unknown');
+          const resolvedSymbol = sym?.label || node.node_id.split(':').pop() || node.node_id;
+          const relationshipText = edge
+            ? `${edge.kind} ${edge.target} at line ${edge.line || sym?.start_line || 1}`
+            : `calls ${targetsToAnalyze[0] || 'target'} (blast radius hop ${node.distance})`;
 
           return {
             id: node.node_id,
-            symbol: sym?.label || node.node_id,
-            file: sym?.file || 'unknown',
+            symbol: resolvedSymbol,
+            file: resolvedFile,
             line: edge?.line || sym?.start_line || 1,
             start_line: sym?.start_line || 1,
             end_line: sym?.end_line || 20,
             kind: (sym?.kind === 'function' || sym?.kind === 'class' || sym?.kind === 'method' ? sym.kind : 'function') as EnrichedFinding['kind'],
             distance: node.distance,
-            relationship: `${edge?.kind || 'calls'} ${
-              edge?.target || targetsToAnalyze[0]
-            } at line ${edge?.line || sym?.start_line || 1}`,
+            relationship: relationshipText,
             why_affected: whyAffected,
             is_test: isTest,
             has_unresolved: hasUnresolved,
@@ -147,10 +231,10 @@ export const ImpactViewPage: React.FC = () => {
         const testFindings = findings.filter(f => f.is_test);
 
         // Check if an unresolved edge touches the targets directly
-        const hasUnresolved = MOCK_EDGES.some(
+        const hasUnresolved = edgePool.some(
           e =>
             !e.resolved &&
-            (targetSet.has(e.source) || targetSet.has(e.target))
+            (targetSet.has(e.source) || targetSet.has(e.target) || targetSet.has(e.source.split(':').pop()!) || targetSet.has(e.target.split(':').pop()!))
         );
 
         // RISK RULE: High if > 5 direct dependents or unresolved edge touches target; Medium for 2 to 5; Low otherwise. (NO PERCENTAGES)
@@ -197,9 +281,10 @@ export const ImpactViewPage: React.FC = () => {
 
         // Callers without tests
         const testTargetSet = new Set<string>();
-        for (const e of MOCK_EDGES) {
+        for (const e of edgePool) {
           if (e.source.startsWith('test_') || e.source.includes('test')) {
             testTargetSet.add(e.target);
+            testTargetSet.add(e.target.split(':').pop()!);
           }
         }
         const callersWithoutTests: TestCaseItem[] = nonTests
@@ -253,18 +338,35 @@ export const ImpactViewPage: React.FC = () => {
         setState('failed');
       }
     },
-    [repoId, setImpactTargets]
+    [repoId, setImpactTargets, isDemo, graphData]
   );
 
-  // Auto-run on mount or if queryTarget changes
+  // Auto-run on mount or if queryTarget/graphData changes
   useEffect(() => {
     if (queryTarget && !targets.includes(queryTarget)) {
       setTargets([queryTarget]);
       runAnalysis([queryTarget], depth);
-    } else {
+    } else if (!isDemo && graphData.nodes.length > 0) {
+      const isCurrentTargetValid = targets.length > 0 && targets.some(t =>
+        graphData.nodes.some(n => n.label === t || n.id === t || n.id.endsWith(`:${t}`) || n.file === t)
+      );
+      if (!isCurrentTargetValid) {
+        const firstSym =
+          graphData.nodes.find(n => n.kind === 'class') ||
+          graphData.nodes.find(n => n.kind === 'function' || n.kind === 'method') ||
+          graphData.nodes[0];
+        const targetId = firstSym ? (firstSym.label || firstSym.id) : '';
+        if (targetId) {
+          setTargets([targetId]);
+          runAnalysis([targetId], depth);
+        }
+      } else if (targets.length > 0) {
+        runAnalysis(targets, depth);
+      }
+    } else if (targets.length > 0) {
       runAnalysis(targets, depth);
     }
-  }, [queryTarget]);
+  }, [queryTarget, graphData.nodes.length, isDemo, runAnalysis]);
 
   // Handle Quick Pick click
   const handleQuickPick = (pickId: string) => {
@@ -275,13 +377,13 @@ export const ImpactViewPage: React.FC = () => {
   // Handle Open in Editor
   const handleOpenSource = (filePath: string, startLine: number, endLine?: number) => {
     openFile(filePath, startLine, endLine || startLine);
-    navigate(`/w/${repoId}`);
+    navigate(`/w/${encodeURIComponent(repoId)}`);
   };
 
   // Handle View in Connections
   const handleViewPath = (sourceId: string, targetId: string) => {
     navigate(
-      `/w/${repoId}/connections?source=${encodeURIComponent(
+      `/w/${encodeURIComponent(repoId)}/connections?source=${encodeURIComponent(
         sourceId
       )}&target=${encodeURIComponent(targetId)}`
     );
@@ -313,7 +415,7 @@ export const ImpactViewPage: React.FC = () => {
     if (targets.length > 0) {
       setGraphSelection(targets[0]);
     }
-    navigate(`/w/${repoId}/graph`);
+    navigate(`/w/${encodeURIComponent(repoId)}/graph`);
   };
 
   return (
@@ -335,6 +437,7 @@ export const ImpactViewPage: React.FC = () => {
                   setTargets(newTargets);
                 }
               }}
+              options={isDemo ? undefined : targetOptions}
             />
           </div>
 

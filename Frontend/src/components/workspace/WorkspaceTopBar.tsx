@@ -1,5 +1,5 @@
 import React, { useState, useRef, useEffect } from 'react';
-import { useNavigate, useLocation } from 'react-router-dom';
+import { useNavigate, useLocation, useParams } from 'react-router-dom';
 import {
   Search,
   Sparkles,
@@ -41,11 +41,19 @@ export const WorkspaceTopBar: React.FC = () => {
     }
   }, [avatarMenuOpen]);
 
-  const repoSlug = selectedRepo?.full_name
+  const { repoId: routeRepoId } = useParams<{ repoId: string }>();
+  const decodedRepoId = routeRepoId ? decodeURIComponent(routeRepoId) : '';
+  const repoSlug = decodedRepoId
+    ? encodeURIComponent(decodedRepoId)
+    : selectedRepo?.full_name
     ? encodeURIComponent(selectedRepo.full_name)
     : (selectedRepo?.repo_name || 'my-store');
-  const orgName = selectedRepo?.full_name?.split('/')[0] || 'acme';
-  const repoName = selectedRepo?.repo_name || selectedRepo?.full_name?.split('/')[1] || 'my-store';
+  const orgName = decodedRepoId.includes('/')
+    ? decodedRepoId.split('/')[0]
+    : selectedRepo?.full_name?.split('/')[0] || 'acme';
+  const repoName = decodedRepoId.includes('/')
+    ? decodedRepoId.split('/')[1]
+    : (selectedRepo?.repo_name || selectedRepo?.full_name?.split('/')[1] || 'my-store');
 
   // Determine current active view tab
   const currentPath = location.pathname;

@@ -12,10 +12,16 @@ from app.routes.graph import graph_router
 from app.routes.parse import parse_router
 from fastapi import FastAPI, Request, Response, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import RedirectResponse
+from fastapi.responses import RedirectResponse, FileResponse
+from fastapi.staticfiles import StaticFiles
 from neo4j import AsyncGraphDatabase
 from pydantic import BaseModel
 from qdrant_client import AsyncQdrantClient
+
+import json
+import logging
+
+_logger = logging.getLogger(__name__)
 
 # In-memory registry for public repositories analyzed in session
 _PUBLIC_REPOS: dict[str, dict] = {}
@@ -23,6 +29,51 @@ _PUBLIC_REPOS: dict[str, dict] = {}
 _REDEEMED_STATES: set[str] = set()
 # In-memory secure server-side session store: session_id -> session_data
 _SESSIONS: dict[str, dict] = {}
+
+_DATA_DIR = Path(__file__).resolve().parent / "app" / "data"
+_REPOS_FILE = _DATA_DIR / "repos.json"
+
+
+def _save_repos_to_disk() -> None:
+    try:
+        _DATA_DIR.mkdir(parents=True, exist_ok=True)
+        save_dict = {}
+        for k, v in _PUBLIC_REPOS.items():
+            if "/" in k or k == v.get("repo_id"):
+                save_dict[k] = v
+        with open(_REPOS_FILE, "w", encoding="utf-8") as f:
+            json.dump(save_dict, f, indent=2)
+    except Exception as exc:
+        _logger.warning("Failed to save repos to disk: %s", exc)
+
+
+def _load_repos_from_disk() -> None:
+    try:
+        if _REPOS_FILE.exists():
+            with open(_REPOS_FILE, "r", encoding="utf-8") as f:
+                loaded = json.load(f)
+                if isinstance(loaded, dict):
+                    for k, v in loaded.items():
+                        _PUBLIC_REPOS[k] = v
+                        if "full_name" in v:
+                            _PUBLIC_REPOS[v["full_name"].lower()] = v
+                        if "repo_id" in v:
+                            _PUBLIC_REPOS[str(v["repo_id"]).lower()] = v
+                        if "repo_name" in v:
+                            _PUBLIC_REPOS[v["repo_name"].lower()] = v
+    except Exception as exc:
+        _logger.warning("Failed to load repos from disk: %s", exc)
+
+
+def _get_unique_repos() -> list[dict]:
+    seen = set()
+    unique = []
+    for info in _PUBLIC_REPOS.values():
+        fn = info.get("full_name") or info.get("repo_id")
+        if fn and fn.lower() not in seen:
+            seen.add(fn.lower())
+            unique.append(info)
+    return unique
 
 ENV_PATH = Path(__file__).resolve().parent / ".env"
 
@@ -42,6 +93,7 @@ _GITHUB_URL_RE = re.compile(
 async def lifespan(app: FastAPI):
     configure_tls()
     settings = get_settings()
+    _load_repos_from_disk()
 
     print("ENV file exists:", ENV_PATH.is_file())
     print("NEO4J_URI loaded:", bool(settings.NEO4J_URI))
@@ -62,6 +114,7 @@ async def lifespan(app: FastAPI):
 
     yield
 
+    _save_repos_to_disk()
     await app.state.neo4j.close()
     await app.state.qdrant.close()
 
@@ -599,7 +652,7 @@ async def api_list_repos(request: Request):
     if not sess:
         return [
             {
-                "id": info["repo_id"],
+                "id": info.get("full_name", info["repo_id"]),
                 "name": info["repo_name"],
                 "full_name": info["full_name"],
                 "owner": info.get("owner") or info["full_name"].split("/")[0],
@@ -611,8 +664,7 @@ async def api_list_repos(request: Request):
                 "default_branch": info.get("default_branch", "main"),
                 "html_url": f"https://github.com/{info['full_name']}",
             }
-            for info in _PUBLIC_REPOS.values()
-            if info.get("repo_id") == info.get("clean_id", info.get("repo_id"))
+            for info in _get_unique_repos()
         ]
 
     token = sess["access_token"]
@@ -668,6 +720,9 @@ async def api_list_repos(request: Request):
                 "repo": r_name,
                 "default_branch": r_branch,
                 "private": r.get("private", False),
+                "state": "ready",
+                "stage": f"Repository '{r_full_name}' is connected and ready.",
+                "progress": 100,
             }
             _PUBLIC_REPOS[r_full_name.lower()] = repo_entry
             _PUBLIC_REPOS[r_name.lower()] = repo_entry
@@ -698,6 +753,12 @@ async def api_list_repos(request: Request):
         for r in all_repos
         if isinstance(r, dict)
     ]
+
+
+@app.get("/api/github/repos")
+async def api_github_repos(request: Request):
+    """List accessible GitHub repositories for connecting."""
+    return await api_list_repos(request)
 
 
 class _PublicRepoBody(BaseModel):
@@ -790,7 +851,100 @@ async def api_repos_public(body: _PublicRepoBody):
         "default_branch": meta.get("default_branch", "main"),
     }
     _PUBLIC_REPOS[f"{owner}/{repo}".lower()] = _PUBLIC_REPOS[repo_id]
+    _save_repos_to_disk()
     return repo_data
+
+
+class _ConnectRepoBody(BaseModel):
+    repo_id: str | int | None = None
+    url: str | None = None
+
+
+@app.post("/api/repos/connect")
+async def api_repos_connect(body: _ConnectRepoBody, request: Request):
+    """Connect a repository by id or URL for indexing and exploration."""
+    sess = _get_session_from_request(request)
+    token = sess["access_token"] if sess else None
+
+    raw_target = str(body.repo_id or body.url or "").strip()
+    if not raw_target:
+        raise HTTPException(status_code=400, detail="Missing repo_id or url in request.")
+
+    if raw_target.startswith("http://") or raw_target.startswith("https://"):
+        owner, repo = _parse_github_url(raw_target)
+        try:
+            owner, repo, default_branch = await _resolve_public_repo(f"{owner}/{repo}", token, sess)
+        except Exception:
+            default_branch = "main"
+    else:
+        owner, repo, default_branch = await _resolve_public_repo(raw_target, token, sess)
+
+    full_name = f"{owner}/{repo}"
+    clean_id = full_name.lower()
+    now = datetime.now(timezone.utc).isoformat()
+
+    driver = getattr(request.app.state, "neo4j", None)
+    files_cnt, syms_cnt, edges_cnt = 0, 0, 0
+    if driver:
+        try:
+            from app.graph import get_graph_stats
+            from app.config import get_settings
+            settings = get_settings()
+            stats = await get_graph_stats(driver, clean_id, database=settings.NEO4J_DATABASE)
+            files_cnt = stats.files_count
+            syms_cnt = stats.total_symbols
+            edges_cnt = stats.relationships_count
+        except Exception:
+            pass
+
+    state = "ready" if files_cnt > 0 else "pending"
+    stage = f"Repository {full_name} indexed ({files_cnt} files)" if files_cnt > 0 else f"Repository {full_name} connected"
+
+    repo_data = {
+        "repo_id": clean_id,
+        "repo_name": repo,
+        "full_name": full_name,
+        "owner": owner,
+        "repo": repo,
+        "default_branch": default_branch,
+        "language": "Unknown",
+        "file_count": files_cnt,
+        "symbol_count": syms_cnt,
+        "edge_count": edges_cnt,
+        "state": state,
+        "stage": stage,
+        "progress": 100 if files_cnt > 0 else 0,
+        "files_total": files_cnt,
+        "files_done": files_cnt,
+        "error": None,
+        "updated_at": now,
+    }
+
+    _PUBLIC_REPOS[clean_id] = repo_data
+    _PUBLIC_REPOS[f"{owner}-{repo}".lower()] = repo_data
+    _PUBLIC_REPOS[repo.lower()] = repo_data
+    _save_repos_to_disk()
+
+    return {
+        "id": full_name,
+        "repo_name": repo,
+        "full_name": full_name,
+        "branch": default_branch,
+        "status": {
+            "state": state,
+            "stage": stage,
+            "progress": 100 if files_cnt > 0 else 0,
+            "files_total": files_cnt,
+            "files_done": files_cnt,
+            "error": None,
+            "updated_at": now,
+        },
+        "file_count": files_cnt,
+        "symbol_count": syms_cnt,
+        "edge_count": edges_cnt,
+        "language": "Unknown",
+        "updated_at": now,
+    }
 
 
 _LANGUAGE_MAP = {
@@ -871,63 +1025,88 @@ async def _resolve_public_repo(
       - bare 'repo_name' (if in cache or belonging to authenticated user)
       - numeric repo id (if in cache or resolved via GitHub API)
     """
-    clean_id = repo_id.strip().lower()
+    unquoted = urllib.parse.unquote(repo_id).strip()
+    clean_id = unquoted.lower()
+    raw_lower = repo_id.strip().lower()
+
     if clean_id in _PUBLIC_REPOS:
         info = _PUBLIC_REPOS[clean_id]
+        return info["owner"], info["repo"], info.get("default_branch", "main")
+    if raw_lower in _PUBLIC_REPOS:
+        info = _PUBLIC_REPOS[raw_lower]
         return info["owner"], info["repo"], info.get("default_branch", "main")
 
     # Check any registered repos where repo_id, full_name, repo_name, or repo matches
     for info in _PUBLIC_REPOS.values():
-        if clean_id in (
+        match_targets = {
             str(info.get("repo_id", "")).lower(),
             info.get("full_name", "").lower(),
             info.get("repo_name", "").lower(),
             info.get("repo", "").lower(),
-        ):
+        }
+        if clean_id in match_targets or raw_lower in match_targets:
             return info["owner"], info["repo"], info.get("default_branch", "main")
 
-    # If repo_id contains slash: owner/repo
+    candidates: list[tuple[str, str]] = []
     if "/" in clean_id:
         owner, repo = clean_id.split("/", 1)
-        api_url = f"{_GITHUB_PUBLIC_REPO_URL}/{owner}/{repo}"
+        candidates.append((owner, repo))
     elif "__" in clean_id:
         owner, repo = clean_id.split("__", 1)
-        api_url = f"{_GITHUB_PUBLIC_REPO_URL}/{owner}/{repo}"
-    elif "-" in clean_id:
-        owner, repo = clean_id.split("-", 1)
-        api_url = f"{_GITHUB_PUBLIC_REPO_URL}/{owner}/{repo}"
+        candidates.append((owner, repo))
     elif session and session.get("user", {}).get("username"):
         owner = session["user"]["username"]
-        repo = repo_id.strip()
-        api_url = f"{_GITHUB_PUBLIC_REPO_URL}/{owner}/{repo}"
+        candidates.append((owner, repo_id.strip()))
+        if "-" in clean_id:
+            parts = clean_id.split("-")
+            for i in range(1, len(parts)):
+                candidates.append(("-".join(parts[:i]), "-".join(parts[i:])))
+    elif "-" in clean_id:
+        parts = clean_id.split("-")
+        for i in range(1, len(parts)):
+            candidates.append(("-".join(parts[:i]), "-".join(parts[i:])))
     elif clean_id.isdigit() and access_token:
-        api_url = f"https://api.github.com/repositories/{clean_id}"
-        owner, repo = "", ""
+        pass
     else:
         raise HTTPException(status_code=404, detail=f"Repository '{repo_id}' not found.")
 
     req_headers = _get_github_headers(access_token)
+    meta = None
+    last_status = 404
+    owner, repo = "", ""
 
-    try:
-        async with httpx.AsyncClient(timeout=10.0) as http:
-            resp = await http.get(api_url, headers=req_headers)
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=502, detail="GitHub API request timed out")
-    except httpx.RequestError:
-        raise HTTPException(status_code=502, detail="Could not reach GitHub API")
+    if clean_id.isdigit() and access_token:
+        api_url = f"https://api.github.com/repositories/{clean_id}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0) as http:
+                resp = await http.get(api_url, headers=req_headers)
+                last_status = resp.status_code
+                if resp.status_code == 200:
+                    meta = resp.json()
+        except Exception:
+            pass
+    else:
+        for c_owner, c_repo in candidates:
+            api_url = f"{_GITHUB_PUBLIC_REPO_URL}/{c_owner}/{c_repo}"
+            try:
+                async with httpx.AsyncClient(timeout=10.0) as http:
+                    resp = await http.get(api_url, headers=req_headers)
+                    last_status = resp.status_code
+                    if resp.status_code == 200:
+                        meta = resp.json()
+                        owner, repo = c_owner, c_repo
+                        break
+                    elif resp.status_code == 403:
+                        raise HTTPException(status_code=502, detail="GitHub API rate limit exceeded. Please try again later.")
+            except httpx.TimeoutException:
+                raise HTTPException(status_code=502, detail="GitHub API request timed out")
+            except httpx.RequestError:
+                raise HTTPException(status_code=502, detail="Could not reach GitHub API")
 
-    if resp.status_code == 404:
-        target_name = f"{owner}/{repo}" if owner and repo else repo_id
-        raise HTTPException(status_code=404, detail=f"Repository '{target_name}' not found on GitHub.")
-    if resp.status_code == 403:
-        raise HTTPException(status_code=502, detail="GitHub API rate limit exceeded. Please try again later.")
-    if resp.status_code != 200:
-        raise HTTPException(status_code=502, detail=f"GitHub API returned HTTP {resp.status_code}")
-
-    try:
-        meta = resp.json()
-    except Exception:
-        raise HTTPException(status_code=502, detail="Malformed response from GitHub API")
+    if not meta:
+        if last_status == 403:
+            raise HTTPException(status_code=502, detail="GitHub API rate limit exceeded. Please try again later.")
+        raise HTTPException(status_code=404, detail=f"Repository '{repo_id}' not found on GitHub.")
 
     if meta.get("private") and not access_token:
         raise HTTPException(status_code=400, detail="Private repositories require GitHub OAuth connection.")
@@ -935,7 +1114,16 @@ async def _resolve_public_repo(
     owner = meta.get("owner", {}).get("login", owner) if isinstance(meta.get("owner"), dict) else owner
     repo = meta.get("name", repo)
     default_branch = meta.get("default_branch", "main")
+    existing = (
+        _PUBLIC_REPOS.get(clean_id)
+        or _PUBLIC_REPOS.get(raw_lower)
+        or _PUBLIC_REPOS.get(f"{owner}/{repo}".lower())
+        or _PUBLIC_REPOS.get(f"{owner}-{repo}".lower())
+        or _PUBLIC_REPOS.get(repo.lower())
+        or {}
+    )
     repo_data = {
+        **existing,
         "repo_id": clean_id,
         "repo_name": repo,
         "full_name": f"{owner}/{repo}",
@@ -944,8 +1132,11 @@ async def _resolve_public_repo(
         "default_branch": default_branch,
     }
     _PUBLIC_REPOS[clean_id] = repo_data
+    _PUBLIC_REPOS[raw_lower] = repo_data
     _PUBLIC_REPOS[f"{owner}/{repo}".lower()] = repo_data
+    _PUBLIC_REPOS[f"{owner}-{repo}".lower()] = repo_data
     _PUBLIC_REPOS[repo.lower()] = repo_data
+    _save_repos_to_disk()
     return owner, repo, default_branch
 
 
@@ -1070,32 +1261,74 @@ async def api_repos_tree(repo_id: str, request: Request):
 @app.get("/api/repos/{repo_id:path}/status")
 async def api_repos_status(repo_id: str, request: Request):
     """Get indexing/connection status of a repository."""
+    unquoted = urllib.parse.unquote(repo_id).strip()
     sess = _get_session_from_request(request)
     token = sess["access_token"] if sess else None
-    owner, repo, default_branch = await _resolve_public_repo(repo_id, token, sess)
+    owner, repo, default_branch = await _resolve_public_repo(unquoted, token, sess)
 
-    clean_id = repo_id.strip().lower()
+    clean_id = unquoted.lower()
+    raw_lower = repo_id.strip().lower()
     cached = (
         _PUBLIC_REPOS.get(clean_id)
+        or _PUBLIC_REPOS.get(raw_lower)
         or _PUBLIC_REPOS.get(f"{owner}/{repo}".lower())
         or _PUBLIC_REPOS.get(f"{owner}-{repo}".lower())
+        or _PUBLIC_REPOS.get(repo.lower())
     )
+
+    if cached and cached.get("state") == "ready":
+        return {
+            "state": "ready",
+            "stage": cached.get("stage", f"Repository '{owner}/{repo}' is connected and ready."),
+            "progress": cached.get("progress", 100),
+            "files_total": cached.get("files_total", cached.get("files_done", 0)),
+            "files_done": cached.get("files_done", 0),
+            "error": cached.get("error"),
+            "updated_at": cached.get("updated_at", datetime.now(timezone.utc).isoformat()),
+        }
+
+    # If not already marked ready, check Neo4j knowledge graph for actual indexed file counts
+    driver = getattr(request.app.state, "neo4j", None)
+    if driver:
+        try:
+            import asyncio
+            from app.graph import get_graph_stats
+            from app.config import get_settings
+            settings = get_settings()
+            stats = await asyncio.wait_for(
+                get_graph_stats(driver, clean_id, database=settings.NEO4J_DATABASE),
+                timeout=0.5,
+            )
+            if stats and stats.files_count > 0:
+                return {
+                    "state": "ready",
+                    "stage": f"Knowledge graph indexed ({stats.files_count} files, {stats.total_symbols} symbols).",
+                    "progress": 100,
+                    "files_total": stats.files_count,
+                    "files_done": stats.files_count,
+                    "error": None,
+                    "updated_at": cached.get("updated_at", datetime.now(timezone.utc).isoformat()) if cached else datetime.now(timezone.utc).isoformat(),
+                }
+        except Exception:
+            pass
+
     if cached and "state" in cached:
         return {
-            "state": cached.get("state", "ready"),
-            "stage": cached.get("stage", "Repository connected and ready."),
-            "progress": cached.get("progress", 100),
+            "state": cached["state"],
+            "stage": cached.get("stage", f"Repository '{owner}/{repo}' is connected and ready." if cached["state"] == "ready" else "Repository connected, awaiting indexing."),
+            "progress": cached.get("progress", 100 if cached["state"] == "ready" else 0),
             "files_total": cached.get("files_total", 0),
             "files_done": cached.get("files_done", 0),
             "error": cached.get("error"),
             "updated_at": cached.get("updated_at", datetime.now(timezone.utc).isoformat()),
         }
+
     return {
         "state": "ready",
         "stage": f"Repository '{owner}/{repo}' is connected and ready.",
         "progress": 100,
-        "files_total": 0,
-        "files_done": 0,
+        "files_total": cached.get("files_total", 0) if cached else 0,
+        "files_done": cached.get("files_done", 0) if cached else 0,
         "error": None,
         "updated_at": datetime.now(timezone.utc).isoformat(),
     }
@@ -1127,10 +1360,12 @@ async def _fetch_repo_file_content(
     sess = _get_session_from_request(request)
     token = sess["access_token"] if sess else None
     owner, repo, default_branch = await _resolve_public_repo(repo_id, token, sess)
+    language = _detect_language(clean_path)
 
     content_url = f"{_GITHUB_PUBLIC_REPO_URL}/{owner}/{repo}/contents/{clean_path}"
     req_headers = _get_github_headers(token)
 
+    resp = None
     try:
         async with httpx.AsyncClient(timeout=15.0) as http:
             resp = await http.get(
@@ -1138,9 +1373,36 @@ async def _fetch_repo_file_content(
                 params={"ref": default_branch},
                 headers=req_headers,
             )
-    except httpx.TimeoutException:
-        raise HTTPException(status_code=502, detail="GitHub API request timed out")
-    except httpx.RequestError:
+    except (httpx.TimeoutException, httpx.RequestError):
+        pass
+
+    # If rate-limited (HTTP 403) or network failure on public repo, fall back to raw.githubusercontent.com
+    if (resp is None or resp.status_code == 403) and not token:
+        raw_url = f"https://raw.githubusercontent.com/{owner}/{repo}/{default_branch}/{clean_path}"
+        try:
+            async with httpx.AsyncClient(timeout=10.0, follow_redirects=True) as http:
+                raw_resp = await http.get(raw_url)
+                if raw_resp.status_code == 200:
+                    text_content = raw_resp.text
+                    file_size = len(raw_resp.content)
+                    max_file_size = 1_048_576  # 1 MB
+                    if file_size > max_file_size:
+                        raise HTTPException(
+                            status_code=413,
+                            detail=f"File '{clean_path}' exceeds the maximum viewable size of 1 MB ({file_size} bytes).",
+                        )
+                    if b"\x00" in raw_resp.content:
+                        raise HTTPException(
+                            status_code=400,
+                            detail=f"File '{clean_path}' contains binary data and cannot be viewed as text.",
+                        )
+                    return clean_path, text_content, file_size, language
+        except HTTPException:
+            raise
+        except Exception:
+            pass
+
+    if resp is None:
         raise HTTPException(status_code=502, detail="Could not reach GitHub API")
 
     if resp.status_code == 404:

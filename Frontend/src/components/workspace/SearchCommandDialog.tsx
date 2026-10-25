@@ -64,12 +64,12 @@ export const SearchCommandDialog: React.FC<SearchCommandDialogProps> = ({
 
   if (!isOpen) return null;
 
-  const repoId = selectedRepo?.repo_name || 'my-store';
+  const repoId = selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'my-store';
 
   const handleSelect = (match: SearchMatch) => {
     if (match.type === 'file' || match.type === 'code' || match.type === 'symbol') {
       openFile(match.file_path, match.line, match.line ? match.line + 2 : undefined);
-      navigate(`/w/${repoId}`);
+      navigate(`/w/${encodeURIComponent(repoId)}`);
     }
     onClose();
   };
@@ -123,7 +123,7 @@ export const SearchCommandDialog: React.FC<SearchCommandDialogProps> = ({
                 </div>
                 <div
                   onClick={() => {
-                    navigate(`/w/${repoId}/graph`);
+                    navigate(`/w/${encodeURIComponent(repoId)}/graph`);
                     onClose();
                   }}
                   className="flex items-center justify-between p-2 rounded hover:bg-raised text-text cursor-pointer transition-colors"
@@ -136,7 +136,7 @@ export const SearchCommandDialog: React.FC<SearchCommandDialogProps> = ({
                 </div>
                 <div
                   onClick={() => {
-                    navigate(`/w/${repoId}/impact`);
+                    navigate(`/w/${encodeURIComponent(repoId)}/impact`);
                     onClose();
                   }}
                   className="flex items-center justify-between p-2 rounded hover:bg-raised text-text cursor-pointer transition-colors"

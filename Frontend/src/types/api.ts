@@ -80,6 +80,8 @@ export interface GraphNode {
   file: string;
   start_line?: number;
   end_line?: number;
+  signature?: string;
+  docstring?: string;
   description?: string;
   metrics?: {
     in_degree?: number;
@@ -89,7 +91,7 @@ export interface GraphNode {
   };
 }
 
-export type EdgeKind = 'calls' | 'imports' | 'inherits';
+export type EdgeKind = 'calls' | 'imports' | 'inherits' | 'defines';
 
 export interface GraphEdge {
   id: string;

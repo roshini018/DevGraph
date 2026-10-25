@@ -39,6 +39,10 @@ class Settings(BaseSettings):
     # Secret for signing OAuth state tokens (optional but recommended)
     OAUTH_STATE_SECRET: SecretStr | None = None
 
+    # Optional LLM API keys for Q&A Agent and Embeddings
+    OPENAI_API_KEY: SecretStr | None = None
+    GEMINI_API_KEY: SecretStr | None = None
+
     @field_validator("CORS_ORIGINS", mode="after")
     @classmethod
     def parse_cors_origins(cls, value: list[str] | str) -> list[str]:

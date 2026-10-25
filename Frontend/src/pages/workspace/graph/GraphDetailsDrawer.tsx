@@ -49,7 +49,7 @@ export const GraphDetailsDrawer: React.FC<GraphDetailsDrawerProps> = ({
     setRightOpen,
   } = useAppStore();
 
-  const repoId = selectedRepo?.repo_name || 'my-store';
+  const repoId = selectedRepo?.full_name || selectedRepo?.id || selectedRepo?.repo_name || 'default';
 
   const [copied, setCopied] = useState(false);
   const [descLoading, setDescLoading] = useState(true);
@@ -73,7 +73,7 @@ export const GraphDetailsDrawer: React.FC<GraphDetailsDrawerProps> = ({
 
   const handleOpenCode = () => {
     openFile(item.path, 1);
-    navigate(`/w/${repoId}`);
+    navigate(`/w/${encodeURIComponent(repoId)}`);
   };
 
   const handleAskAI = () => {
@@ -84,12 +84,12 @@ export const GraphDetailsDrawer: React.FC<GraphDetailsDrawerProps> = ({
   const handleImpact = () => {
     const targetSymbol = item.symbols?.[0]?.name || item.name.replace('.py', '');
     setImpactTargets([targetSymbol]);
-    navigate(`/w/${repoId}/impact`);
+    navigate(`/w/${encodeURIComponent(repoId)}/impact`);
   };
 
   const handleCompare = () => {
     setMultiSelection([item.path]);
-    navigate(`/w/${repoId}/connections?source=${encodeURIComponent(item.path)}`);
+    navigate(`/w/${encodeURIComponent(repoId)}/connections?source=${encodeURIComponent(item.path)}`);
   };
 
   return (

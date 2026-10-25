@@ -167,6 +167,15 @@ export const ConnectPage: React.FC = () => {
     try {
       const repo = await analyzePublicRepo(publicUrl);
       setSelectedRepo(repo);
+
+      // Trigger background graph indexing (AST parse → Neo4j → Qdrant → BM25)
+      const repoId = repo.full_name || repo.id;
+      fetch(`/api/repos/${encodeURIComponent(repoId)}/graph/index`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clear_existing: true, max_files: 150 }),
+      }).catch(() => {/* indexing errors shown in GraphViewPage */});
+
       navigate(`/w/${encodeURIComponent(repo.full_name || repo.id)}`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to analyze repository.';

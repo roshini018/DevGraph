@@ -16,8 +16,8 @@ import {
   Check,
   Search,
 } from 'lucide-react';
-import { getConnection } from '../../api/client';
-import type { ConnectionResult, Citation, GraphEdge } from '../../types/api';
+import { getConnection, getGraph } from '../../api/client';
+import type { ConnectionResult, Citation, GraphEdge, GraphNode } from '../../types/api';
 import { useAppStore } from '../../store/useAppStore';
 import { Button } from '../../components/ui/Button';
 import { EvidenceCard } from '../../components/ui/EvidenceCard';
@@ -26,7 +26,8 @@ import { ErrorState } from '../../components/ui/ErrorState';
 import { MOCK_SYMBOLS, MOCK_FILES, MOCK_EDGES } from '../../mocks/repo';
 
 export const ConnectionsViewPage: React.FC = () => {
-  const { repoId = 'my-store' } = useParams();
+  const { repoId: rawRepoId = 'my-store' } = useParams();
+  const repoId = decodeURIComponent(rawRepoId);
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
 
@@ -36,8 +37,20 @@ export const ConnectionsViewPage: React.FC = () => {
   const { openFile, addMessage, setRightOpen, setImpactTargets, setGraphSelection } =
     useAppStore();
 
-  const [source, setSource] = useState(querySource || 'place_order');
-  const [target, setTarget] = useState(queryTarget || 'validate_amount');
+  const isDemo = !repoId || repoId === 'my-store' || repoId === 'repo-1' || repoId === 'default';
+
+  const [graphData, setGraphData] = useState<{ nodes: GraphNode[]; edges: GraphEdge[] }>({ nodes: [], edges: [] });
+
+  useEffect(() => {
+    let isMounted = true;
+    getGraph(repoId, 'symbol').then(res => {
+      if (isMounted) setGraphData(res);
+    }).catch(() => {});
+    return () => { isMounted = false; };
+  }, [repoId]);
+
+  const [source, setSource] = useState(querySource || (isDemo ? 'place_order' : ''));
+  const [target, setTarget] = useState(queryTarget || (isDemo ? 'validate_amount' : ''));
 
   const [activePathIndex, setActivePathIndex] = useState(0);
   const [connection, setConnection] = useState<ConnectionResult | null>(null);
@@ -52,19 +65,29 @@ export const ConnectionsViewPage: React.FC = () => {
 
   // Available options
   const symbolOptions = useMemo(() => {
-    return MOCK_SYMBOLS.map(s => ({
-      id: s.id,
-      label: s.label,
-      file: s.file,
-      kind: s.kind,
-    }));
-  }, []);
+    if (isDemo) {
+      return MOCK_SYMBOLS.map(s => ({
+        id: s.id,
+        label: s.label,
+        file: s.file,
+        kind: s.kind,
+      }));
+    }
+    return graphData.nodes
+      .filter(n => n.kind !== 'file')
+      .map(n => ({
+        id: n.label || n.id,
+        label: n.label,
+        file: n.file || '',
+        kind: n.kind,
+      }));
+  }, [isDemo, graphData.nodes]);
 
   const filteredSourceOptions = useMemo(() => {
     const q = sourceSearch.trim().toLowerCase();
     if (!q) return symbolOptions.slice(0, 15);
     return symbolOptions
-      .filter(s => s.id.toLowerCase().includes(q) || s.file.toLowerCase().includes(q))
+      .filter(s => s.id.toLowerCase().includes(q) || s.file.toLowerCase().includes(q) || s.label.toLowerCase().includes(q))
       .slice(0, 15);
   }, [symbolOptions, sourceSearch]);
 
@@ -72,7 +95,7 @@ export const ConnectionsViewPage: React.FC = () => {
     const q = targetSearch.trim().toLowerCase();
     if (!q) return symbolOptions.slice(0, 15);
     return symbolOptions
-      .filter(s => s.id.toLowerCase().includes(q) || s.file.toLowerCase().includes(q))
+      .filter(s => s.id.toLowerCase().includes(q) || s.file.toLowerCase().includes(q) || s.label.toLowerCase().includes(q))
       .slice(0, 15);
   }, [symbolOptions, targetSearch]);
 
@@ -102,12 +125,31 @@ export const ConnectionsViewPage: React.FC = () => {
 
   // Sync with searchParams or initial load
   useEffect(() => {
-    const s = querySource || 'place_order';
-    const t = queryTarget || 'validate_amount';
-    setSource(s);
-    setTarget(t);
-    handleTrace(s, t);
-  }, [querySource, queryTarget]);
+    if (querySource && queryTarget) {
+      setSource(querySource);
+      setTarget(queryTarget);
+      handleTrace(querySource, queryTarget);
+    } else if (isDemo) {
+      const s = querySource || 'place_order';
+      const t = queryTarget || 'validate_amount';
+      setSource(s);
+      setTarget(t);
+      handleTrace(s, t);
+    } else if (graphData.edges.length > 0) {
+      const firstEdge = graphData.edges.find(e => e.kind === 'calls' || e.kind === 'imports') || graphData.edges[0];
+      const s = querySource || firstEdge.source.split(':').pop() || firstEdge.source;
+      const t = queryTarget || firstEdge.target.split(':').pop() || firstEdge.target;
+      setSource(s);
+      setTarget(t);
+      handleTrace(s, t);
+    } else if (graphData.nodes.length >= 2) {
+      const s = querySource || graphData.nodes[0].label || graphData.nodes[0].id;
+      const t = queryTarget || graphData.nodes[1].label || graphData.nodes[1].id;
+      setSource(s);
+      setTarget(t);
+      handleTrace(s, t);
+    }
+  }, [querySource, queryTarget, isDemo, graphData.edges, graphData.nodes]);
 
   // Swap source and target
   const handleSwap = () => {
@@ -133,14 +175,25 @@ export const ConnectionsViewPage: React.FC = () => {
     return connection.paths[activePathIndex] || connection.paths[0];
   }, [connection, activePathIndex]);
 
+  // Helper to find node in real graph or mock
+  const findNode = useCallback((id: string) => {
+    if (isDemo) return MOCK_SYMBOLS.find(s => s.id === id);
+    return graphData.nodes.find(n => n.id === id || n.label === id || n.id.endsWith(`:${id}`));
+  }, [isDemo, graphData.nodes]);
+
   // Active path edges with details
   const activeEdges = useMemo(() => {
     if (!activePath) return [];
+    const pool = isDemo ? MOCK_EDGES : graphData.edges;
     const result: GraphEdge[] = [];
     for (let i = 0; i < activePath.length - 1; i++) {
       const u = activePath[i];
       const v = activePath[i + 1];
-      const edge = MOCK_EDGES.find(e => e.source === u && e.target === v);
+      const edge = pool.find(e =>
+        (e.source === u && e.target === v) ||
+        (e.source.endsWith(u) && e.target.endsWith(v)) ||
+        (e.source.split(':').pop() === u && e.target.split(':').pop() === v)
+      );
       if (edge) {
         result.push(edge);
       } else {
@@ -155,7 +208,7 @@ export const ConnectionsViewPage: React.FC = () => {
       }
     }
     return result;
-  }, [activePath]);
+  }, [activePath, isDemo, graphData.edges]);
 
   // Check if any heuristic call along the path
   const hasHeuristic = useMemo(() => {
@@ -171,11 +224,11 @@ export const ConnectionsViewPage: React.FC = () => {
       const srcNode = activePath[i];
       const tgtNode = activePath[i + 1];
       const edge = activeEdges[i];
-      const srcSym = MOCK_SYMBOLS.find(s => s.id === srcNode);
-      const tgtSym = MOCK_SYMBOLS.find(s => s.id === tgtNode);
+      const srcSym = findNode(srcNode);
+      const tgtSym = findNode(tgtNode);
 
-      const srcFile = srcSym ? srcSym.file.split('/').slice(-1)[0] : 'file';
-      const tgtFile = tgtSym ? tgtSym.file.split('/').slice(-1)[0] : 'file';
+      const srcFile = srcSym ? (srcSym.file?.split('/').pop() || 'file') : 'file';
+      const tgtFile = tgtSym ? (tgtSym.file?.split('/').pop() || 'file') : 'file';
       const kind = edge?.kind || 'calls';
       const line = edge?.line ? `at line ${edge.line}` : '';
 
@@ -194,7 +247,7 @@ export const ConnectionsViewPage: React.FC = () => {
       }
     }
     return parts.join(' ');
-  }, [activePath, activeEdges]);
+  }, [activePath, activeEdges, findNode]);
 
   // Generate EvidenceCards from active path
   const evidenceCitations = useMemo<Citation[]>(() => {
@@ -205,13 +258,13 @@ export const ConnectionsViewPage: React.FC = () => {
       const srcNode = activePath[i];
       const tgtNode = activePath[i + 1];
       const edge = activeEdges[i];
-      const srcSym = MOCK_SYMBOLS.find(s => s.id === srcNode);
+      const srcSym = findNode(srcNode);
 
-      const filePath = srcSym?.file || 'src/services/order_service.py';
+      const filePath = srcSym?.file || '';
       const fileObj = MOCK_FILES.find(f => f.path === filePath);
       const focusLine = edge?.line || srcSym?.start_line || 1;
 
-      let snippet = `${srcNode}(...) -> calls ${tgtNode}(...)`;
+      let snippet = srcSym?.signature || `${srcNode}(...) -> calls ${tgtNode}(...)`;
       let startLine = focusLine;
       let endLine = focusLine;
 
@@ -237,14 +290,14 @@ export const ConnectionsViewPage: React.FC = () => {
     }
 
     return list;
-  }, [activePath, activeEdges]);
+  }, [activePath, activeEdges, findNode]);
 
   // Action handlers
   const handleOpenSource = (symbolId: string) => {
-    const sym = MOCK_SYMBOLS.find(s => s.id === symbolId);
-    if (sym) {
-      openFile(sym.file, sym.start_line, sym.end_line);
-      navigate(`/w/${repoId}`);
+    const sym = findNode(symbolId);
+    if (sym && sym.file) {
+      openFile(sym.file, sym.start_line || 1, sym.end_line || sym.start_line || 1);
+      navigate(`/w/${encodeURIComponent(repoId)}`);
     }
   };
 
@@ -258,12 +311,12 @@ export const ConnectionsViewPage: React.FC = () => {
 
   const handleAnalyzeImpact = () => {
     setImpactTargets([target]);
-    navigate(`/w/${repoId}/impact?target=${encodeURIComponent(target)}`);
+    navigate(`/w/${encodeURIComponent(repoId)}/impact?target=${encodeURIComponent(target)}`);
   };
 
   const handleBackToGraph = () => {
     setGraphSelection(source);
-    navigate(`/w/${repoId}/graph`);
+    navigate(`/w/${encodeURIComponent(repoId)}/graph`);
   };
 
   return (
@@ -534,7 +587,7 @@ export const ConnectionsViewPage: React.FC = () => {
                     {activePath.map((nodeId, idx) => {
                       const isSource = idx === 0;
                       const isDest = idx === activePath.length - 1;
-                      const symInfo = MOCK_SYMBOLS.find(s => s.id === nodeId);
+                      const symInfo = findNode(nodeId);
                       const edge = activeEdges[idx];
 
                       return (
@@ -621,7 +674,7 @@ export const ConnectionsViewPage: React.FC = () => {
                         citation={cit}
                         onNavigate={(fp, l) => {
                           openFile(fp, l, l);
-                          navigate(`/w/${repoId}`);
+                          navigate(`/w/${encodeURIComponent(repoId)}`);
                         }}
                       />
                     ))}

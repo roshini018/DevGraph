@@ -118,15 +118,15 @@ def extract_import_specifiers(stmt: str) -> list[str]:
     if not stmt:
         return []
     # JS/TS: import ... from '...' or import '...' or require('...')
-    js_matches = re.findall(r'''(?:import|from|require\s*\()\s*['\"]([^'\"]+)['\"]''', stmt)
+    js_matches = re.findall(r"""(?:import|from|require\s*\()\s*['"]([^'"]+)['"]""", stmt)
     if js_matches:
         return js_matches
     # Python: from pkg.module import ...
-    py_from = re.findall(r'''from\s+([.\w]+)\s+import''', stmt)
+    py_from = re.findall(r"""from\s+([.\w]+)\s+import""", stmt)
     if py_from:
         return py_from
     # Python: import pkg.module
-    py_imp = re.findall(r'''import\s+([\w.]+)''', stmt)
+    py_imp = re.findall(r"""import\s+([\w.]+)""", stmt)
     if py_imp:
         return py_imp
     return []
@@ -134,14 +134,36 @@ def extract_import_specifiers(stmt: str) -> list[str]:
 
 def resolve_import_target(stmt: str, current_file: str, all_files: set[str]) -> str | None:
     """Resolve an import statement to a target file existing in the repository."""
-    specs = extract_import_specifiers(stmt)
-    if not specs:
+    if not stmt:
         return None
+    curr_dir = posixpath.dirname(current_file) if "/" in current_file else ""
+    candidate_bases: list[str] = []
 
-    for spec in specs:
-        raw = spec.strip()
-        candidate_bases: list[str] = []
+    # 1. Python relative import: from .foo import bar OR from . import foo OR from ..foo import bar
+    py_rel = re.match(r"^\s*from\s+(\.+)([\w.]*)\s+import\s+(.*)", stmt)
+    if py_rel:
+        dots, mod, names_str = py_rel.group(1), py_rel.group(2), py_rel.group(3)
+        up = len(dots) - 1
+        parts = curr_dir.split("/") if curr_dir else []
+        if up >= len(parts):
+            target_base_dir = ""
+        elif up == 0:
+            target_base_dir = curr_dir
+        else:
+            target_base_dir = "/".join(parts[:-up])
 
+        if mod:
+            sub = mod.replace(".", "/")
+            candidate_bases.append(posixpath.join(target_base_dir, sub).lstrip("/"))
+        else:
+            names = [n.strip().split()[0] for n in names_str.split(",") if n.strip()]
+            for name in names:
+                candidate_bases.append(posixpath.join(target_base_dir, name).lstrip("/"))
+
+    # 2. JS/TS or standard quoted imports: import ... from '...'
+    specs = re.findall(r"""(?:import|from|require\s*\()\s*['"]([^'"]+)['"]""", stmt)
+    for raw in specs:
+        raw = raw.strip()
         if raw.startswith("@/"):
             sub = raw[2:]
             candidate_bases.extend([sub, f"src/{sub}"])
@@ -149,31 +171,43 @@ def resolve_import_target(stmt: str, current_file: str, all_files: set[str]) -> 
             sub = raw[1:].lstrip("/")
             candidate_bases.extend([sub, f"src/{sub}"])
         elif raw.startswith("."):
-            curr_dir = posixpath.dirname(current_file)
-            candidate_bases.append(posixpath.normpath(posixpath.join(curr_dir, raw)))
+            candidate_bases.append(posixpath.normpath(posixpath.join(curr_dir, raw)).lstrip("/"))
         else:
-            candidate_bases.append(raw)
-            candidate_bases.append(f"src/{raw}")
+            candidate_bases.extend([raw, f"src/{raw}"])
             if "." in raw and "/" not in raw:
-                # Python dotted package
                 candidate_bases.append(raw.replace(".", "/"))
 
-        for base in candidate_bases:
-            candidates = [
-                base,
-                f"{base}.tsx",
-                f"{base}.ts",
-                f"{base}.jsx",
-                f"{base}.js",
-                f"{base}.py",
-                f"{base}/index.tsx",
-                f"{base}/index.ts",
-                f"{base}/index.jsx",
-                f"{base}/index.js",
-            ]
-            for c in candidates:
-                if c in all_files and c != current_file:
-                    return c
+    # 3. Python standard: from pkg.module import ...
+    py_from = re.findall(r"from\s+([\w.]+)\s+import", stmt)
+    for pf in py_from:
+        if not pf.startswith("."):
+            sub = pf.replace(".", "/")
+            candidate_bases.extend([sub, f"src/{sub}"])
+
+    # 4. Python standard: import pkg.module
+    py_imp = re.findall(r"import\s+([\w.]+)", stmt)
+    for pi in py_imp:
+        if not pi.startswith("."):
+            sub = pi.replace(".", "/")
+            candidate_bases.extend([sub, f"src/{sub}"])
+
+    for base in candidate_bases:
+        base = base.strip("/")
+        for ext in [
+            "",
+            ".py",
+            ".ts",
+            ".tsx",
+            ".js",
+            ".jsx",
+            "/__init__.py",
+            "/index.ts",
+            "/index.tsx",
+            "/index.js",
+        ]:
+            c = (base + ext).strip("/")
+            if c in all_files and c != current_file:
+                return c
 
     return None
 
@@ -222,16 +256,26 @@ async def clear_repository_graph(
 # ===========================================================================
 
 def _find_calls_in_node(node: Any, canonical_lang: str) -> list[tuple[str, int]]:
-    """Traverse an AST node and find direct function invocation identifiers with line numbers."""
+    """Traverse an AST node and find direct function and method invocation identifiers with line numbers."""
     calls = []
     if canonical_lang == "python" and node.type == "call":
         func_node = node.child_by_field_name("function")
-        if func_node and func_node.type == "identifier":
-            calls.append((func_node.text.decode("utf-8", errors="replace"), node.start_point.row + 1))
+        if func_node:
+            if func_node.type == "identifier":
+                calls.append((func_node.text.decode("utf-8", errors="replace"), node.start_point.row + 1))
+            elif func_node.type == "attribute":
+                attr_node = func_node.child_by_field_name("attribute")
+                if attr_node:
+                    calls.append((attr_node.text.decode("utf-8", errors="replace"), node.start_point.row + 1))
     elif canonical_lang in ("javascript", "typescript", "tsx") and node.type == "call_expression":
         func_node = node.child_by_field_name("function")
-        if func_node and func_node.type == "identifier":
-            calls.append((func_node.text.decode("utf-8", errors="replace"), node.start_point.row + 1))
+        if func_node:
+            if func_node.type == "identifier":
+                calls.append((func_node.text.decode("utf-8", errors="replace"), node.start_point.row + 1))
+            elif func_node.type == "member_expression":
+                prop_node = func_node.child_by_field_name("property")
+                if prop_node:
+                    calls.append((prop_node.text.decode("utf-8", errors="replace"), node.start_point.row + 1))
 
     for child in node.children:
         calls.extend(_find_calls_in_node(child, canonical_lang))
@@ -246,8 +290,7 @@ def extract_reliable_calls(
     """Extract CALLS relationships ONLY when the caller and callee can be reliably resolved.
 
     Specifically: caller is a function or method in the file, and callee identifier
-    unambiguously matches an existing defined function/method in the same file.
-    Does NOT guess across unknown external references or built-ins.
+    unambiguously matches an existing defined function/method in the file or imported scope.
     """
     tree, source_bytes, canonical_lang, _, _ = parse_source(content, path)
     if not tree or not canonical_lang:
@@ -255,44 +298,66 @@ def extract_reliable_calls(
 
     calls: list[dict[str, Any]] = []
 
-    def walk_callers(node: Any, current_caller: str | None):
+    def walk_callers(node: Any, current_class: str | None = None, current_caller: str | None = None):
         nonlocal calls
+        cur_cls = current_class
         caller_name = current_caller
+
         if canonical_lang == "python":
-            if node.type in ("function_definition",):
+            if node.type == "class_definition":
+                name_node = node.child_by_field_name("name")
+                if name_node:
+                    cur_cls = name_node.text.decode("utf-8", errors="replace")
+                body = node.child_by_field_name("body")
+                if body:
+                    for child in body.children:
+                        walk_callers(child, current_class=cur_cls, current_caller=None)
+                return
+            elif node.type == "function_definition":
                 name_node = node.child_by_field_name("name")
                 if name_node:
                     caller_name = name_node.text.decode("utf-8", errors="replace")
                 body = node.child_by_field_name("body")
-                if body:
+                if body and caller_name:
                     for raw_callee, call_line in _find_calls_in_node(body, canonical_lang):
                         if raw_callee in known_symbol_names and raw_callee != caller_name:
                             calls.append({
                                 "caller": caller_name,
+                                "caller_class": cur_cls,
                                 "callee": raw_callee,
                                 "line": call_line,
                             })
                 return
         elif canonical_lang in ("javascript", "typescript", "tsx"):
-            if node.type in ("function_declaration", "method_definition"):
+            if node.type == "class_declaration":
+                name_node = node.child_by_field_name("name")
+                if name_node:
+                    cur_cls = name_node.text.decode("utf-8", errors="replace")
+                body = node.child_by_field_name("body")
+                if body:
+                    for child in body.children:
+                        walk_callers(child, current_class=cur_cls, current_caller=None)
+                return
+            elif node.type in ("function_declaration", "method_definition"):
                 name_node = node.child_by_field_name("name")
                 if name_node:
                     caller_name = name_node.text.decode("utf-8", errors="replace")
                 body = node.child_by_field_name("body")
-                if body:
+                if body and caller_name:
                     for raw_callee, call_line in _find_calls_in_node(body, canonical_lang):
                         if raw_callee in known_symbol_names and raw_callee != caller_name:
                             calls.append({
                                 "caller": caller_name,
+                                "caller_class": cur_cls,
                                 "callee": raw_callee,
                                 "line": call_line,
                             })
                 return
 
         for child in node.children:
-            walk_callers(child, caller_name)
+            walk_callers(child, current_class=cur_cls, current_caller=caller_name)
 
-    walk_callers(tree.root_node, None)
+    walk_callers(tree.root_node, None, None)
     return calls
 
 
@@ -346,6 +411,11 @@ async def ingest_repository_graph(
     file_imports_batch = []
     chunks_batch = []
     calls_batch = []
+    inherits_batch = []
+
+    symbol_id_by_name: dict[str, list[str]] = {}
+    file_symbols: dict[str, dict[str, str]] = {}
+    file_imports_map: dict[str, dict[str, str]] = {}
 
     for file_res in parsed_files:
         clean_path = file_res.path.strip().lstrip("/")
@@ -368,7 +438,7 @@ async def ingest_repository_graph(
         })
         files_indexed += 1
 
-        file_func_names = set()
+        file_symbols[clean_path] = {}
 
         for sym in file_res.symbols:
             total_symbols += 1
@@ -385,6 +455,16 @@ async def ingest_repository_graph(
                     "start_line": sym.start_line,
                     "end_line": sym.end_line,
                 })
+                file_symbols[clean_path][sym.name] = class_id
+                symbol_id_by_name.setdefault(sym.name, []).append(class_id)
+                if getattr(sym, "inherits", None):
+                    for base in sym.inherits:
+                        inherits_batch.append({
+                            "child_id": class_id,
+                            "base_name": base,
+                            "repo_id": repo_id,
+                            "file_path": clean_path,
+                        })
             elif sym.kind == "method":
                 parent_cls = sym.parent or "anonymous"
                 class_id = f"{file_id}:class:{parent_cls}"
@@ -402,7 +482,10 @@ async def ingest_repository_graph(
                     "start_line": sym.start_line,
                     "end_line": sym.end_line,
                 })
-                file_func_names.add(sym.name)
+                file_symbols[clean_path][f"{parent_cls}.{sym.name}"] = method_id
+                file_symbols[clean_path][sym.name] = method_id
+                symbol_id_by_name.setdefault(sym.name, []).append(method_id)
+                symbol_id_by_name.setdefault(f"{parent_cls}.{sym.name}", []).append(method_id)
             elif sym.kind == "function":
                 func_id = f"{file_id}:function:{sym.name}"
                 functions_batch.append({
@@ -416,7 +499,8 @@ async def ingest_repository_graph(
                     "start_line": sym.start_line,
                     "end_line": sym.end_line,
                 })
-                file_func_names.add(sym.name)
+                file_symbols[clean_path][sym.name] = func_id
+                symbol_id_by_name.setdefault(sym.name, []).append(func_id)
             elif sym.kind == "interface":
                 iface_id = f"{file_id}:interface:{sym.name}"
                 interfaces_batch.append({
@@ -429,6 +513,16 @@ async def ingest_repository_graph(
                     "start_line": sym.start_line,
                     "end_line": sym.end_line,
                 })
+                file_symbols[clean_path][sym.name] = iface_id
+                symbol_id_by_name.setdefault(sym.name, []).append(iface_id)
+                if getattr(sym, "inherits", None):
+                    for base in sym.inherits:
+                        inherits_batch.append({
+                            "child_id": iface_id,
+                            "base_name": base,
+                            "repo_id": repo_id,
+                            "file_path": clean_path,
+                        })
             elif sym.kind == "import":
                 import_id = f"{file_id}:import:{sym.start_line}"
                 imports_batch.append({
@@ -449,6 +543,13 @@ async def ingest_repository_graph(
                         "repo_id": repo_id,
                         "line": sym.start_line,
                     })
+                    imp_stmt = sym.signature or sym.name
+                    if "import" in imp_stmt:
+                        after_imp = imp_stmt.split("import")[-1]
+                        for piece in after_imp.split(","):
+                            c_name = piece.strip().split()[0]
+                            if c_name and c_name not in ("*", "(", ")"):
+                                file_imports_map.setdefault(clean_path, {})[c_name] = target_file
 
         for chk in file_res.chunks:
             total_chunks += 1
@@ -466,18 +567,84 @@ async def ingest_repository_graph(
                 "token_count": chk.token_count,
             })
 
-        # Reliable intra-file CALLS resolution
-        if file_contents and clean_path in file_contents and file_func_names:
+    # Reliable CALLS resolution across all files
+    for file_res in parsed_files:
+        clean_path = file_res.path.strip().lstrip("/")
+        file_id = f"{repo_id}:{clean_path}"
+        if file_contents and clean_path in file_contents:
             content_str = file_contents[clean_path]
-            raw_calls = extract_reliable_calls(content_str, clean_path, file_func_names)
+            local_map = file_symbols.get(clean_path, {})
+            imported_map = file_imports_map.get(clean_path, {})
+            candidate_names = set(local_map.keys())
+            candidate_names.update(imported_map.keys())
+            candidate_names.update(symbol_id_by_name.keys())
+
+            raw_calls = extract_reliable_calls(content_str, clean_path, candidate_names)
             for c in raw_calls:
-                calls_batch.append({
-                    "file_id": file_id,
-                    "repo_id": repo_id,
-                    "caller_name": c["caller"],
-                    "callee_name": c["callee"],
-                    "line": c["line"],
-                })
+                c_caller = c["caller"]
+                c_parent = c.get("caller_class")
+                c_callee = c["callee"]
+                c_line = c["line"]
+
+                if c_parent:
+                    caller_id = f"{file_id}:method:{c_parent}:{c_caller}"
+                else:
+                    caller_id = f"{file_id}:function:{c_caller}"
+
+                callee_id = None
+                if c_parent and f"{c_parent}.{c_callee}" in local_map:
+                    callee_id = local_map[f"{c_parent}.{c_callee}"]
+                elif c_callee in local_map:
+                    callee_id = local_map[c_callee]
+                elif c_callee in imported_map:
+                    tgt = imported_map[c_callee]
+                    tgt_map = file_symbols.get(tgt, {})
+                    if c_callee in tgt_map:
+                        callee_id = tgt_map[c_callee]
+                    else:
+                        callee_id = f"{repo_id}:{tgt}:function:{c_callee}"
+                elif c_callee in symbol_id_by_name and len(symbol_id_by_name[c_callee]) == 1:
+                    callee_id = symbol_id_by_name[c_callee][0]
+
+                if callee_id and callee_id != caller_id:
+                    calls_batch.append({
+                        "caller_id": caller_id,
+                        "callee_id": callee_id,
+                        "line": c_line,
+                    })
+
+    # Resolve INHERITS relationships across all files
+    resolved_inherits_batch = []
+    for inh in inherits_batch:
+        child_id = inh["child_id"]
+        base = inh["base_name"]
+        f_path = inh["file_path"]
+        parent_id = None
+        local_map = file_symbols.get(f_path, {})
+        imported_map = file_imports_map.get(f_path, {})
+
+        if base in local_map:
+            parent_id = local_map[base]
+        elif base in imported_map:
+            tgt_file = imported_map[base]
+            tgt_map = file_symbols.get(tgt_file, {})
+            if base in tgt_map:
+                parent_id = tgt_map[base]
+            else:
+                parent_id = f"{repo_id}:{tgt_file}:class:{base}"
+        elif base in symbol_id_by_name:
+            for cand in symbol_id_by_name[base]:
+                if ":class:" in cand or ":interface:" in cand:
+                    parent_id = cand
+                    break
+            if not parent_id and len(symbol_id_by_name[base]) == 1:
+                parent_id = symbol_id_by_name[base][0]
+
+        if parent_id and parent_id != child_id:
+            resolved_inherits_batch.append({
+                "child_id": child_id,
+                "parent_id": parent_id,
+            })
 
     # 4. Execute Parameterized Batch Merges in Transaction
     async with driver.session(**kwargs) as session:
@@ -653,33 +820,24 @@ async def ingest_repository_graph(
         # Reliable CALLS Relationships
         if calls_batch:
             calls_query = """
-            UNWIND $calls AS c
-            MATCH (caller {repo_id: c.repo_id})
-            WHERE (caller:Function OR caller:Method) AND caller.file_path ENDS WITH c.file_id
-               OR (caller:Function AND caller.id STARTS WITH c.file_id AND caller.name = c.caller_name)
-               OR (caller:Method AND caller.id STARTS WITH c.file_id AND caller.name = c.caller_name)
-            MATCH (callee {repo_id: c.repo_id})
-            WHERE (callee:Function AND callee.id STARTS WITH c.file_id AND callee.name = c.callee_name)
-               OR (callee:Method AND callee.id STARTS WITH c.file_id AND callee.name = c.callee_name)
-            MERGE (caller)-[rel:CALLS {line: c.line}]->(callee)
-            """
-            # Direct exact caller/callee ID matching
-            exact_calls = []
-            for item in calls_batch:
-                f_id = item["file_id"]
-                exact_calls.append({
-                    "repo_id": item["repo_id"],
-                    "caller_id": f"{f_id}:function:{item['caller_name']}",
-                    "callee_id": f"{f_id}:function:{item['callee_name']}",
-                    "line": item["line"],
-                })
-            exact_calls_query = """
-            UNWIND $exact_calls AS call
-            MATCH (caller:Function {id: call.caller_id})
-            MATCH (callee:Function {id: call.callee_id})
+            UNWIND $calls AS call
+            MATCH (caller {id: call.caller_id})
+            MATCH (callee {id: call.callee_id})
             MERGE (caller)-[rel:CALLS {line: call.line}]->(callee)
             """
-            res = await session.run(exact_calls_query, {"exact_calls": exact_calls})
+            res = await session.run(calls_query, {"calls": calls_batch})
+            s = await res.consume()
+            relationships_created += s.counters.relationships_created
+
+        # Class / Interface INHERITS Relationships
+        if resolved_inherits_batch:
+            inherits_query = """
+            UNWIND $inherits AS inh
+            MATCH (child {id: inh.child_id})
+            MATCH (parent {id: inh.parent_id})
+            MERGE (child)-[rel:INHERITS]->(parent)
+            """
+            res = await session.run(inherits_query, {"inherits": resolved_inherits_batch})
             s = await res.consume()
             relationships_created += s.counters.relationships_created
 
@@ -787,6 +945,44 @@ async def get_graph_elements(
     edges_list: list[GraphEdge] = []
     seen_edges: set[str] = set()
 
+    def _add_node_if_missing(node_obj, labels_list=None):
+        if not node_obj:
+            return
+        n_id = node_obj.get("id", str(node_obj.element_id))
+        if not n_id or n_id in nodes_map:
+            return
+        labels_set = set(labels_list or [])
+        if "File" in labels_set:
+            n_kind = "file"
+        elif "Class" in labels_set:
+            n_kind = "class"
+        elif "Method" in labels_set:
+            n_kind = "method"
+        elif "Function" in labels_set:
+            n_kind = "function"
+        elif "Interface" in labels_set:
+            n_kind = "interface"
+        elif "Import" in labels_set:
+            n_kind = "import"
+        elif labels_list:
+            n_kind = labels_list[0].lower()
+        else:
+            n_kind = "symbol"
+
+        path = node_obj.get("path") or node_obj.get("file_path") or ""
+        label = node_obj.get("name") or (path.split("/")[-1] if "/" in path else path) or n_id
+        nodes_map[n_id] = GraphNode(
+            id=n_id,
+            label=label,
+            kind=n_kind,
+            file=path,
+            start_line=node_obj.get("start_line"),
+            end_line=node_obj.get("end_line"),
+            signature=node_obj.get("signature"),
+            docstring=node_obj.get("docstring"),
+            language=node_obj.get("language"),
+        )
+
     # Query 1: File nodes (essential for file card layout)
     files_query = """
     MATCH (f:File)
@@ -826,6 +1022,16 @@ async def get_graph_elements(
     # Query 5: Structural DEFINES relationships (File->Symbol, Class->Method)
     defines_query = """
     MATCH (source)-[r:DEFINES]->(target)
+    WHERE source.repo_id IN $repo_ids AND target.repo_id IN $repo_ids
+    RETURN source, labels(source) AS s_labels,
+           r,
+           target, labels(target) AS t_labels
+    LIMIT $limit
+    """
+
+    # Query 6: Class / Interface INHERITS hierarchy
+    inherits_query = """
+    MATCH (source)-[r:INHERITS]->(target)
     WHERE source.repo_id IN $repo_ids AND target.repo_id IN $repo_ids
     RETURN source, labels(source) AS s_labels,
            r,
@@ -895,22 +1101,8 @@ async def get_graph_elements(
                             properties={"line": r_rel.get("line")} if r_rel and r_rel.get("line") else {},
                         )
                     )
-                if s_id not in nodes_map:
-                    s_path = s_node.get("path", s_id)
-                    nodes_map[s_id] = GraphNode(
-                        id=s_id,
-                        label=s_path.split("/")[-1] if "/" in s_path else s_path,
-                        kind="file",
-                        file=s_path,
-                    )
-                if t_id not in nodes_map:
-                    t_path = t_node.get("path", t_id)
-                    nodes_map[t_id] = GraphNode(
-                        id=t_id,
-                        label=t_path.split("/")[-1] if "/" in t_path else t_path,
-                        kind="file",
-                        file=t_path,
-                    )
+                _add_node_if_missing(s_node, ["File"])
+                _add_node_if_missing(t_node, ["File"])
 
         # 4. Load CALLS edges
         c_res = await session.run(calls_query, {"repo_ids": repo_ids, "limit": limit})
@@ -933,6 +1125,8 @@ async def get_graph_elements(
                             properties={"line": r_rel.get("line")} if r_rel and r_rel.get("line") else {},
                         )
                     )
+                _add_node_if_missing(s_node, record.get("s_labels"))
+                _add_node_if_missing(t_node, record.get("t_labels"))
 
         # 5. Load DEFINES edges
         d_res = await session.run(defines_query, {"repo_ids": repo_ids, "limit": limit})
@@ -955,6 +1149,35 @@ async def get_graph_elements(
                             properties={"line": r_rel.get("line")} if r_rel and r_rel.get("line") else {},
                         )
                     )
+                _add_node_if_missing(s_node, record.get("s_labels"))
+                _add_node_if_missing(t_node, record.get("t_labels"))
+
+        # 6. Load INHERITS edges
+        inh_res = await session.run(inherits_query, {"repo_ids": repo_ids, "limit": limit})
+        async for record in inh_res:
+            s_node = record["source"]
+            t_node = record["target"]
+            r_rel = record["r"]
+            s_id = s_node.get("id", str(s_node.element_id))
+            t_id = t_node.get("id", str(t_node.element_id))
+            if s_id and t_id:
+                edge_id = f"{s_id}->INHERITS->{t_id}"
+                if edge_id not in seen_edges:
+                    seen_edges.add(edge_id)
+                    edges_list.append(
+                        GraphEdge(
+                            id=edge_id,
+                            source=s_id,
+                            target=t_id,
+                            kind="INHERITS",
+                            properties={"line": r_rel.get("line")} if r_rel and r_rel.get("line") else {},
+                        )
+                    )
+                _add_node_if_missing(s_node, record.get("s_labels"))
+                _add_node_if_missing(t_node, record.get("t_labels"))
+
+    # Strictly filter out any edges referencing missing nodes
+    edges_list = [e for e in edges_list if e.source in nodes_map and e.target in nodes_map]
 
     nodes_list = list(nodes_map.values())
     return GraphElementsResponse(

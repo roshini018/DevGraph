@@ -98,12 +98,22 @@ export const ReposPage: React.FC = () => {
 
     setIsAnalyzingPublic(true);
     try {
+      // Step 1: Register the repo on the backend
       const connected = await analyzePublicRepo(publicRepoUrl);
       setConnectedRepos(prev => [connected, ...prev]);
       clearWorkspaceState();
       setSelectedRepo(connected);
-      // Navigate using the full_name slug (owner/repo) so the backend
-      // _resolve_public_repo can resolve it via owner/repo path split.
+
+      // Step 2: Trigger background graph indexing (AST parse → Neo4j → Qdrant → BM25)
+      // This runs asynchronously — navigation happens immediately, graph loads when ready
+      const repoId = connected.full_name;
+      fetch(`/api/repos/${encodeURIComponent(repoId)}/graph/index`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clear_existing: true, max_files: 150 }),
+      }).catch(() => {/* indexing errors handled in GraphViewPage */});
+
+      // Navigate using the full_name slug (owner/repo)
       navigate(`/w/${encodeURIComponent(connected.full_name)}`);
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Failed to analyze repository.';
@@ -154,80 +164,11 @@ export const ReposPage: React.FC = () => {
     };
   }, []);
 
-  // Consolidate into Vercel-style unified repository list
+  // Consolidate into unified repository list — real repos only, no mock data
   const allRepoItems = useMemo<ExtendedRepoItem[]>(() => {
     const items: ExtendedRepoItem[] = [];
 
-    // 1. Indexed connected repo: acme/my-store (Ready)
-    items.push({
-      id: 'repo-my-store',
-      full_name: 'acme/my-store',
-      repo_name: 'my-store',
-      owner: 'acme',
-      description: 'E-commerce microservice backend with checkout, payment processing, and inventory AST hierarchy.',
-      language: 'Python',
-      is_private: false,
-      updated_at: '2 hours ago',
-      status: 'ready',
-      file_count: 16,
-      symbol_count: 54,
-    });
-
-    // 2. acme/data-pipeline (Indexing state)
-    items.push({
-      id: 'repo-data-pipeline',
-      full_name: 'acme/data-pipeline',
-      repo_name: 'data-pipeline',
-      owner: 'acme',
-      description: 'Streaming ETL data pipeline and AST schema ingestion workflows.',
-      language: 'Python',
-      is_private: true,
-      updated_at: 'Yesterday',
-      status: 'indexing',
-      file_count: 24,
-      symbol_count: 72,
-    });
-
-    // 3. acme/payments-worker (Not indexed state)
-    items.push({
-      id: 'repo-payments-worker',
-      full_name: 'acme/payments-worker',
-      repo_name: 'payments-worker',
-      owner: 'acme',
-      description: 'Stripe webhook listener and background payment reconciliation worker.',
-      language: 'Python',
-      is_private: true,
-      updated_at: '3 days ago',
-      status: 'not_indexed',
-    });
-
-    // 4. acme/analytics-service (Failed state)
-    items.push({
-      id: 'repo-analytics-service',
-      full_name: 'acme/analytics-service',
-      repo_name: 'analytics-service',
-      owner: 'acme',
-      description: 'Customer event tracking and conversion analytics service.',
-      language: 'Python',
-      is_private: false,
-      updated_at: '5 days ago',
-      status: 'failed',
-    });
-
-    // 5. acme/store-frontend (TypeScript - Not indexed)
-    items.push({
-      id: 'repo-store-frontend',
-      full_name: 'acme/store-frontend',
-      repo_name: 'store-frontend',
-      owner: 'acme',
-      description: 'React + Vite storefront application.',
-      language: 'TypeScript',
-      is_private: false,
-      updated_at: '1 week ago',
-      status: 'not_indexed',
-    });
-
-    // Any newly ingested or connected repositories
+    // Real repositories fetched from backend / registered via Analyze
     connectedRepos.forEach(cr => {
       if (!items.some(it => it.full_name === cr.full_name || it.id === cr.id)) {
         const parts = cr.full_name ? cr.full_name.split('/') : [];

@@ -885,7 +885,22 @@ class TestRepoStatusEndpoint:
         assert data["progress"] == 100
 
     def test_status_for_slash_encoded_repo(self):
+        from main import _PUBLIC_REPOS
         client = TestClient(app)
+        _PUBLIC_REPOS["pallets/flask"] = {
+            "repo_id": "pallets/flask",
+            "repo_name": "flask",
+            "full_name": "pallets/flask",
+            "owner": "pallets",
+            "repo": "flask",
+            "default_branch": "main",
+            "state": "ready",
+            "stage": "Ready for viewing",
+            "progress": 100,
+            "files_total": 5,
+            "files_done": 5,
+            "error": None,
+        }
         resp = client.get("/api/repos/pallets%2Fflask/status")
         assert resp.status_code == 200
         assert resp.json()["state"] == "ready"
